@@ -1,35 +1,14 @@
 mod book_info;
+use poem_openapi::{payload::Json, OpenApi};
 
-use poem_openapi::{payload::Json, types::ToJSON, ApiResponse, OpenApi};
-
-/// API 结构体
 pub struct Api;
 
-#[derive(ApiResponse)]
-pub enum OpenApiResult<T>
-where
-    T: ToJSON,
-{
-    #[oai(status = 200)]
-    Success(Json<T>),
-    #[oai(status = 400)]
-    Error(Json<String>),
-}
-
-impl<T: ToJSON, E: std::fmt::Display> From<Result<T, E>> for OpenApiResult<T> {
-    fn from(value: Result<T, E>) -> Self {
-        match value {
-            Ok(value) => OpenApiResult::Success(Json(value)),
-            Err(e) => OpenApiResult::Error(Json(e.to_string())),
-        }
-    }
-}
-/// 定义 API 端点
 #[OpenApi]
 impl Api {
+    /// get book menu
     #[oai(path = "/book_info/menu", method = "get")]
-    async fn get_menu(&self) -> OpenApiResult<String> {
-        book_info::get_menu().await.into()
+    async fn get_menu(&self) -> poem::Result<Json<String>> {
+        Ok(Json(book_info::get_menu().await?))
     }
 }
 

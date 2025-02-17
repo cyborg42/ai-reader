@@ -1107,6 +1107,7 @@ version = "3.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d32edf6781dc01de285cf2b1bd5dc5a3fd0d96aa5c4680e356c0462fab8f793a"
 dependencies = [
+ "anyhow",
  "bytes",
  "chrono",
  "cookie",
