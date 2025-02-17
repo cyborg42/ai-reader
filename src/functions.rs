@@ -1,4 +1,4 @@
-mod get_book_info;
+mod book_info;
 
 use poem_openapi::{payload::Json, types::ToJSON, ApiResponse, OpenApi};
 
@@ -16,12 +16,20 @@ where
     Error(Json<String>),
 }
 
+impl<T: ToJSON, E: std::fmt::Display> From<Result<T, E>> for OpenApiResult<T> {
+    fn from(value: Result<T, E>) -> Self {
+        match value {
+            Ok(value) => OpenApiResult::Success(Json(value)),
+            Err(e) => OpenApiResult::Error(Json(e.to_string())),
+        }
+    }
+}
 /// 定义 API 端点
 #[OpenApi]
 impl Api {
-    #[oai(path = "/menu", method = "get")]
+    #[oai(path = "/book_info/menu", method = "get")]
     async fn get_menu(&self) -> OpenApiResult<String> {
-        get_book_info::get_menu().await
+        book_info::get_menu().await.into()
     }
 }
 

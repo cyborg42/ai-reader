@@ -17,7 +17,7 @@ struct Args {
     #[arg(short, long, default_value = DEFAULT_SERVER_ADDR)]
     server_addr: String,
     /// 书籍路径
-    #[arg(short, long)]
+    #[arg(short, long, default_value = "./book")]
     book_path: PathBuf,
 }
 
