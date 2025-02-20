@@ -11,68 +11,66 @@ use tracing::info;
 use crate::llm_fn::{self};
 
 #[derive(Debug, Clone, Default)]
+pub struct ChapterNode {
+    pub chapter: Chapter,
+    pub sub_nodes: Vec<ChapterNode>,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct Chapter {
     pub name: String,
     pub content: String,
     pub number: SectionNumber,
-    pub sub_items: Vec<Chapter>,
     pub parent_names: Vec<String>,
     pub summary: Option<String>,
     pub path: Option<PathBuf>,
 }
 
-pub struct ChapterMut<'a> {
-    pub name: &'a mut String,
-    pub content: &'a mut String,
-    pub number: &'a mut SectionNumber,
-    pub parent_names: &'a mut Vec<String>,
-    pub summary: &'a mut Option<String>,
-    pub path: &'a mut Option<PathBuf>,
-}
-
-impl Chapter {
+impl ChapterNode {
     pub fn get_toc_item(&self, with_summary: bool) -> String {
-        let indent = if self.number.0.len() > 1 && self.number.0[0] > 0 {
-            self.number.0.len() - 1
+        let indent = if self.chapter.number.0.len() > 1 && self.chapter.number.0[0] > 0 {
+            self.chapter.number.0.len() - 1
         } else {
             0
         };
         let indent = "  ".repeat(indent);
-        let path = if let Some(path) = &self.path {
+        let path = if let Some(path) = &self.chapter.path {
             path.to_str().unwrap_or("")
         } else {
             ""
         };
-        let summary = if let (Some(summary), true) = (&self.summary, with_summary) {
+        let summary = if let (Some(summary), true) = (&self.chapter.summary, with_summary) {
             format!(" - {}", summary)
         } else {
             String::new()
         };
         let mut s = format!(
             "{indent}{} [{}]({}){}\n",
-            self.number, self.name, path, summary
+            self.chapter.number, self.chapter.name, path, summary
         );
-        for sub in &self.sub_items {
+        for sub in &self.sub_nodes {
             s.push_str(&sub.get_toc_item(with_summary));
         }
         s
     }
 }
 
-impl From<book::Chapter> for Chapter {
+impl From<book::Chapter> for ChapterNode {
     fn from(ch: book::Chapter) -> Self {
-        let mut chapter = Chapter {
-            name: ch.name,
-            content: ch.content,
-            number: ch.number.unwrap_or_default(),
-            sub_items: vec![],
-            parent_names: ch.parent_names,
-            summary: None,
-            path: ch.path,
+        let mut chapter = ChapterNode {
+            chapter: Chapter {
+                name: ch.name,
+                content: ch.content,
+                number: ch.number.unwrap_or_default(),
+                parent_names: ch.parent_names,
+                summary: None,
+                path: ch.path,
+            },
+            sub_nodes: vec![],
         };
         for i in ch.sub_items {
             if let book::BookItem::Chapter(ch) = i {
-                chapter.sub_items.push(ch.into());
+                chapter.sub_nodes.push(ch.into());
             }
         }
         chapter
@@ -80,14 +78,14 @@ impl From<book::Chapter> for Chapter {
 }
 
 pub struct Chapters<'a> {
-    chapters: VecDeque<&'a Chapter>,
+    chapters: VecDeque<&'a ChapterNode>,
 }
 
 impl<'a> Iterator for Chapters<'a> {
-    type Item = &'a Chapter;
+    type Item = &'a ChapterNode;
     fn next(&mut self) -> Option<Self::Item> {
         let ch = self.chapters.pop_front()?;
-        for sub in &ch.sub_items {
+        for sub in &ch.sub_nodes {
             self.chapters.push_front(sub);
         }
         Some(ch)
@@ -95,31 +93,24 @@ impl<'a> Iterator for Chapters<'a> {
 }
 
 pub struct ChaptersMut<'a> {
-    chapters: VecDeque<&'a mut Chapter>,
+    chapters: VecDeque<&'a mut ChapterNode>,
 }
 
 impl<'a> Iterator for ChaptersMut<'a> {
-    type Item = ChapterMut<'a>;
+    type Item = &'a mut Chapter;
     fn next(&mut self) -> Option<Self::Item> {
         let ch = self.chapters.pop_front()?;
-        for sub_ch in &mut ch.sub_items {
+        for sub_ch in &mut ch.sub_nodes {
             self.chapters.push_front(sub_ch);
         }
-        Some(ChapterMut {
-            name: &mut ch.name,
-            content: &mut ch.content,
-            number: &mut ch.number,
-            parent_names: &mut ch.parent_names,
-            summary: &mut ch.summary,
-            path: &mut ch.path,
-        })
+        Some(&mut ch.chapter)
     }
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct Book {
     pub title: Option<String>,
-    pub chapters: Vec<Chapter>,
+    pub chapters: Vec<ChapterNode>,
     pub src_dir: PathBuf,
     /// chapter summary limit in words, won't load summary if it's less than 10
     pub summary_limit: usize,
@@ -200,14 +191,14 @@ impl Book {
                 if summary.split_whitespace().count() <= summary_limit {
                     // restore summary from file
                     info!("restore summary from file: {}", path.to_str().unwrap());
-                    *ch.summary = Some(summary);
+                    ch.summary = Some(summary);
                     continue;
                 }
             }
-            let summary = llm_fn::summarize(ch.content, summary_limit).await?;
+            let summary = llm_fn::summarize(&ch.content, summary_limit).await?;
             tokio::fs::write(&path, summary.clone()).await?;
             info!("generate summary: {}", path.to_str().unwrap());
-            *ch.summary = Some(summary);
+            ch.summary = Some(summary);
         }
         Ok(())
     }
@@ -223,8 +214,8 @@ impl Book {
         }
         menu
     }
-    pub fn get_chapter(&self, number: &SectionNumber) -> Option<&Chapter> {
-        self.iter().find(|&ch| ch.number == *number)
+    pub fn get_chapter(&self, number: &SectionNumber) -> Option<&ChapterNode> {
+        self.iter().find(|&ch| ch.chapter.number == *number)
     }
 }
 
@@ -233,7 +224,8 @@ mod tests {
     use crate::{
         book::Book,
         config::OpenAIConfig,
-        llm_fn::{self, OPENAI_API_KEY}, utils::init_log,
+        llm_fn::{self, OPENAI_API_KEY},
+        utils::init_log,
     };
 
     #[test]
