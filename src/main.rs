@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use book_server::{functions::Api, utils::init_log};
+use book_server::{functions::BookServer, utils::init_log};
 use clap::Parser;
 use poem::{listener::TcpListener, Route, Server};
 use poem_openapi::OpenApiService;
@@ -30,7 +30,7 @@ async fn main() -> Result<(), std::io::Error> {
 
     info!("Server address: {}", args.server_addr);
     // 创建 API 服务
-    let api_service = OpenApiService::new(Api, "function call", "1.0").server("/api");
+    let api_service = OpenApiService::new(BookServer::new(args.book_path), "function call", "1.0").server("/api");
 
     let swagger_ui = api_service.swagger_ui();
 
