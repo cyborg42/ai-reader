@@ -1,13 +1,17 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::LazyLock};
 
-/// 获取当前时间
-pub fn local_now() -> time::OffsetDateTime {
-    time::OffsetDateTime::now_utc().to_offset(time::macros::offset!(+8))
+use time::UtcOffset;
+
+static LOCAL_OFFSET: LazyLock<UtcOffset> =
+    LazyLock::new(|| time::UtcOffset::current_local_offset().expect("failed to get local offset"));
+
+pub fn now_local() -> time::OffsetDateTime {
+    time::OffsetDateTime::now_utc().to_offset(*LOCAL_OFFSET)
 }
 
 /// 睡眠到当日指定时间点，如果时间超过，则立即执行
 pub fn sleep_until(until: time::Time) {
-    let now = local_now();
+    let now = now_local();
     let until = now.replace_time(until);
     let mut delta = until - now;
     if delta.is_negative() {
@@ -18,7 +22,7 @@ pub fn sleep_until(until: time::Time) {
 
 /// 睡眠到次日指定时间
 pub fn sleep_until_next_day(until: time::Time) {
-    let now = local_now();
+    let now = now_local();
     let until = now
         .replace_date(now.date().next_day().expect("unreachable"))
         .replace_time(until);
@@ -27,7 +31,7 @@ pub fn sleep_until_next_day(until: time::Time) {
 
 /// 初始化日志
 pub fn init_log(log: Option<PathBuf>) -> tracing_appender::non_blocking::WorkerGuard {
-    let subscriber_builder = tracing_subscriber::fmt::Subscriber::builder()
+    let mut subscriber_builder = tracing_subscriber::fmt::Subscriber::builder()
         .with_ansi(false)
         .with_file(true)
         .with_line_number(true)
@@ -40,12 +44,11 @@ pub fn init_log(log: Option<PathBuf>) -> tracing_appender::non_blocking::WorkerG
         let file_appender = tracing_appender::rolling::daily(log, "book_server.log");
         tracing_appender::non_blocking(file_appender)
     } else {
+        subscriber_builder = subscriber_builder.with_ansi(true);
         // output to stdout
         tracing_appender::non_blocking(std::io::stdout())
     };
-    tracing::subscriber::set_global_default(
-        subscriber_builder.with_writer(non_blocking).finish(),
-    )
-    .expect("init log failed");
+    tracing::subscriber::set_global_default(subscriber_builder.with_writer(non_blocking).finish())
+        .expect("init log failed");
     guard
 }

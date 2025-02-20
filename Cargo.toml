@@ -14,7 +14,7 @@ dashmap = "6"
 crossbeam = "0.8.4"
 anyhow = "1.0.95"
 thiserror = "2.0.11"
-time = { version = "0.3.37", features = ["macros"] }
+time = { version = "0.3.37", features = ["macros", "local-offset"] }
 clap = { version = "4.5.24", features = ["derive"] }
 tracing = "0.1.39"
 tracing-subscriber = "0.3.2"

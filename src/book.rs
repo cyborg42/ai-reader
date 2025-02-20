@@ -233,11 +233,12 @@ mod tests {
     use crate::{
         book::Book,
         config::OpenAIConfig,
-        llm_fn::{self, OPENAI_API_KEY},
+        llm_fn::{self, OPENAI_API_KEY}, utils::init_log,
     };
 
     #[test]
     fn test_load_book() {
+        let _guard = init_log(None);
         let mut book = Book::load("./test-book/src", 20).unwrap();
 
         let key = std::fs::read_to_string("./openai_api_key.toml").unwrap();
