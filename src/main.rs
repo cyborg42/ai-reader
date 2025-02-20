@@ -19,6 +19,9 @@ struct Args {
     /// 书籍路径
     #[arg(short, long, default_value = "./book")]
     book_path: PathBuf,
+    /// 存储路径
+    #[arg(short, long, default_value = "./store")]
+    store_dir: PathBuf,
 }
 
 /// 运行 Poem 服务器
@@ -30,7 +33,12 @@ async fn main() -> Result<(), std::io::Error> {
 
     info!("Server address: {}", args.server_addr);
     // 创建 API 服务
-    let api_service = OpenApiService::new(BookServer::new(args.book_path), "function call", "1.0").server("/api");
+    let api_service = OpenApiService::new(
+        BookServer::new(args.book_path, args.store_dir).await,
+        "function call",
+        "1.0",
+    )
+    .server("/api");
 
     let swagger_ui = api_service.swagger_ui();
 

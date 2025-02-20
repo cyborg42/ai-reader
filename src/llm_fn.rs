@@ -37,3 +37,23 @@ pub async fn summarize(content: &str, limit: usize) -> anyhow::Result<String> {
     }
     Ok(summary)
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::config::OpenAIConfig;
+
+    use super::*;
+
+    #[test]
+    fn test_summarize() {
+        let key = std::fs::read_to_string("./openai_api_key.toml").unwrap();
+        let key: openai::Credentials = toml::from_str::<OpenAIConfig>(&key).unwrap().into();
+        OPENAI_API_KEY.set(key).unwrap();
+        let story = "Once upon a time, there was a young programmer who loved to code. Every day, she would spend hours crafting elegant solutions to complex problems. Her passion for programming grew stronger with each line of code she wrote. One day, she created an amazing application that helped many people. The joy of seeing others benefit from her work made all the late nights worth it. She realized that programming wasn't just about writing code - it was about making a difference in the world.";
+        let summary = summarize(story, 20);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(summary);
+        let summary = result.unwrap();
+        println!("{}", summary);
+    }
+}

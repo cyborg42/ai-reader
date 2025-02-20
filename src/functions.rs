@@ -10,8 +10,8 @@ pub struct BookServer {
 }
 
 impl BookServer {
-    pub fn new(src_dir: impl AsRef<Path>) -> Self {
-        let book = Book::load(src_dir, 20).unwrap();
+    pub async fn new(src_dir: impl AsRef<Path>, store_dir: impl AsRef<Path>) -> Self {
+        let book = Book::load(src_dir, store_dir, 20).await.unwrap();
         Self { book }
     }
     pub fn menu(&self) -> String {
