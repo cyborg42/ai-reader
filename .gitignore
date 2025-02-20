@@ -2,3 +2,4 @@
 /logs
 /test-book
 /openai_api_key.toml
+/.*
