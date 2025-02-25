@@ -5,9 +5,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub book_path: PathBuf,
-    pub server_addr: String,
-    pub log_file: Option<PathBuf>,
-    pub storage_path: PathBuf,
+    pub store_path: PathBuf,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

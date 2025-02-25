@@ -1,30 +1,14 @@
-use std::path::Path;
+use poem_openapi::OpenApi;
+use poem_openapi::payload::Json;
 
-use poem_openapi::{payload::Json, OpenApi};
-
-use crate::book::Book;
-
-#[derive(Debug, Clone, Default)]
-pub struct BookServer {
-    book: Book,
-}
-
-impl BookServer {
-    pub async fn new(src_dir: impl AsRef<Path>, store_dir: impl AsRef<Path>) -> Self {
-        let book = Book::load(src_dir, store_dir, 20).await.unwrap();
-        Self { book }
-    }
-    pub fn menu(&self) -> String {
-        format!("{:?}", self.book.title)
-    }
-}
+use crate::book::BookServer;
 
 #[OpenApi]
 impl BookServer {
-    /// get book menu
-    #[oai(path = "/book_info/menu", method = "get")]
-    async fn get_menu(&self) -> Json<String> {
-        Json(self.menu())
+    /// get table of contents
+    #[oai(path = "/book_info/table_of_contents", method = "get")]
+    async fn get_table_of_contents(&self) -> Json<String> {
+        Json(format!(""))
     }
 }
 

@@ -37,8 +37,8 @@ impl ChapterNode {
             String::new()
         };
         let mut s = format!(
-            "{indent}{} [{}]({}){}\n",
-            self.chapter.number, self.chapter.name, path, summary
+            "{indent}{} [{}]({path}){summary}  \n",
+            self.chapter.number, self.chapter.name,
         );
         for sub in &self.sub_nodes {
             s.push_str(&sub.get_toc_item(with_summary));

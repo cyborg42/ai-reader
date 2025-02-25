@@ -1,137 +1,126 @@
+mod book;
 mod chapter;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
-use std::{
-    fs::File,
-    io::Read,
-    path::{Path, PathBuf},
-};
+use book::Book;
 
-use chapter::{ChapterNode, Chapters, ChaptersMut};
-use mdbook::book::{self, SectionNumber};
+use sqlx::SqlitePool;
+use tracing::error;
 
-use tracing::info;
-
-use crate::llm_fn::{self};
-
-#[derive(Debug, Clone, Default)]
-pub struct Book {
-    pub title: Option<String>,
-    pub chapters: Vec<ChapterNode>,
-    pub src_dir: PathBuf,
-    pub store_dir: PathBuf,
-    /// chapter summary limit in words, won't load summary if it's less than 10
-    pub summary_limit: usize,
+use crate::llm_fn;
+#[derive(Debug, Clone)]
+pub struct BookServer {
+    books: HashMap<i64, Book>,
+    bookbase: PathBuf,
+    database: SqlitePool,
 }
 
-impl Book {
-    pub async fn load(
-        src_dir: impl AsRef<Path>,
-        store_dir: impl AsRef<Path>,
-        summary_limit: usize,
+impl Default for BookServer {
+    fn default() -> Self {
+        let database = SqlitePool::connect_lazy("sqlite::memory:").unwrap();
+        Self {
+            books: HashMap::new(),
+            bookbase: PathBuf::new(),
+            database,
+        }
+    }
+}
+
+impl BookServer {
+    /// create a new book server
+    pub async fn new(
+        database: impl AsRef<Path>,
+        bookbase: impl AsRef<Path>,
     ) -> anyhow::Result<Self> {
-        let src_dir = src_dir.as_ref().to_path_buf();
-        let store_dir = store_dir.as_ref().to_path_buf();
-
-        let build_config = mdbook::config::BuildConfig {
-            build_dir: PathBuf::from(""),
-            create_missing: true,
-            use_default_preprocessors: true,
-            extra_watch_dirs: vec![],
+        let database = SqlitePool::connect(&database.as_ref().to_string_lossy())
+            .await
+            .unwrap();
+        let mut server = Self {
+            books: HashMap::new(),
+            bookbase: bookbase.as_ref().to_path_buf(),
+            database,
         };
-
-        let mut ori_book = mdbook::book::load_book(src_dir.clone(), &build_config)?;
-
-        let summary_md = src_dir.join("SUMMARY.md");
-        let mut summary_content = String::new();
-        File::open(&summary_md)?.read_to_string(&mut summary_content)?;
-        let title = mdbook::book::parse_summary(&summary_content)?.title;
-
-        let mut idx = 1;
-        ori_book.for_each_mut(|item| {
-            if let book::BookItem::Chapter(ch) = item {
-                if ch.number.is_none() {
-                    ch.number = Some(SectionNumber::from_iter(vec![0, idx]));
-                    idx += 1;
-                }
-            }
-        });
-
-        let mut book = Self {
-            title,
-            chapters: vec![],
-            src_dir,
-            store_dir,
-            summary_limit,
-        };
-        for i in ori_book.sections {
-            if let book::BookItem::Chapter(ch) = i {
-                book.chapters.push(ch.into());
-            }
-        }
-        book.load_summary(false).await?;
-        Ok(book)
+        server.load_books_from_db().await?;
+        Ok(server)
     }
-
-    pub fn iter(&self) -> Chapters<'_> {
-        Chapters {
-            chapters: self.chapters.iter().collect(),
-        }
-    }
-
-    pub fn iter_mut(&mut self) -> ChaptersMut<'_> {
-        ChaptersMut {
-            chapters: self.chapters.iter_mut().collect(),
-        }
-    }
-
-    pub async fn load_summary(&mut self, regenerate: bool) -> anyhow::Result<()> {
-        if self.summary_limit < 10 {
-            return Ok(());
-        }
-        let src_dir = self.src_dir.clone();
-        let summary_limit = self.summary_limit;
-        for ch in self.iter_mut() {
-            if ch.content.is_empty() {
-                continue;
-            }
-            let path = if let Some(path) = &ch.path {
-                let mut path = path.clone();
-                path.set_extension("summary");
-                src_dir.join(path)
-            } else {
-                continue;
-            };
-            if !regenerate {
-                if let Ok(summary) = tokio::fs::read_to_string(&path).await {
-                    if summary.split_whitespace().count() <= summary_limit {
-                        // restore summary from file
-                        info!("restore summary from file: {}", path.to_str().unwrap());
-                        ch.summary = Some(summary);
-                        continue;
-                    }
-                }
-            }
-            let summary = llm_fn::summarize(&ch.content, summary_limit).await?;
-            tokio::fs::write(&path, summary.clone()).await?;
-            info!("generate summary: {}", path.to_str().unwrap());
-            ch.summary = Some(summary);
+    /// load books from database
+    async fn load_books_from_db(&mut self) -> anyhow::Result<()> {
+        let books = sqlx::query!("select id, path from book")
+            .fetch_all(&self.database)
+            .await
+            .unwrap();
+        for r in books {
+            let book = Book::load(self.bookbase.join(r.path)).await?;
+            self.books.insert(r.id, book);
         }
         Ok(())
     }
+    /// add a book to database
+    async fn add_book(&mut self, path: impl AsRef<Path>) -> anyhow::Result<()> {
+        let book = Book::load(&self.bookbase.join(&path)).await?;
+        let authors = book.authors.join(",");
+        let path = path.as_ref().to_string_lossy().to_string();
+        let book_id = sqlx::query!(
+            "insert into book (title, author, path, description, summary) values (?, ?, ?, ?, ?)",
+            book.title,
+            authors,
+            path,
+            book.description,
+            Option::<String>::None
+        )
+        .execute(&self.database)
+        .await?
+        .last_insert_rowid();
 
-    pub fn get_table_of_contents(&self, with_summary: bool) -> String {
-        let mut menu = if let Some(title) = &self.title {
-            format!("# {}\n", title)
-        } else {
-            String::new()
-        };
-        for ch in &self.chapters {
-            menu.push_str(&ch.get_toc_item(with_summary));
+        let mut summary = book
+            .title
+            .clone()
+            .map(|t| format!("# {}\n", t))
+            .unwrap_or_default();
+        for ch in book.iter() {
+            let index_number = ch.chapter.number.to_string();
+            let ch_summary = llm_fn::summarize(&ch.chapter.content, 100).await?;
+            summary.push_str(&format!(
+                "{} - {}:\n{}\n",
+                index_number, ch.chapter.name, ch_summary
+            ));
+            sqlx::query!(
+                "insert into chapter (book_id, index_number, name, summary) values (?, ?, ?, ?)",
+                book_id,
+                index_number,
+                ch.chapter.name,
+                ch_summary
+            )
+            .execute(&self.database)
+            .await?;
         }
-        menu
+        let summary = llm_fn::summarize(&summary, 1000).await?;
+        sqlx::query!("update book set summary = ? where id = ?", summary, book_id)
+            .execute(&self.database)
+            .await?;
+        self.books.insert(book_id, book);
+        Ok(())
     }
-    pub fn get_chapter(&self, number: &SectionNumber) -> Option<&ChapterNode> {
-        self.iter().find(|&ch| ch.chapter.number == *number)
+
+    async fn add_all_books(&mut self) -> anyhow::Result<()> {
+        let mut paths = Vec::new();
+        for entry in walkdir::WalkDir::new(&self.bookbase) {
+            let entry = entry?;
+            if entry.file_name() == "book.toml" {
+                if let Ok(rel_path) = entry.path().parent().unwrap().strip_prefix(&self.bookbase) {
+                    let rel_path = rel_path.to_path_buf();
+                    paths.push(rel_path);
+                }
+            }
+        }
+
+        for path in paths {
+            if let Err(e) = self.add_book(self.bookbase.join(&path)).await {
+                error!("add book {} failed: {}", path.display(), e);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -139,24 +128,18 @@ impl Book {
 mod tests {
     use crate::{book::Book, config::OpenAIConfig, llm_fn::OPENAI_API_KEY, utils::init_log};
 
-    #[test]
-    fn test_load_book() {
+    #[tokio::test]
+    async fn test_load_book() {
         let _guard = init_log(None);
 
         let key = std::fs::read_to_string("./openai_api_key.toml").unwrap();
         let key: openai::Credentials = toml::from_str::<OpenAIConfig>(&key).unwrap().into();
         OPENAI_API_KEY.set(key).unwrap();
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let future = async move {
-            let book = Book::load("./test-book/src", "./test-book/store", 20)
-                .await
-                .unwrap();
-            let toc = book.get_table_of_contents(true);
-            let words = toc.split_whitespace().count();
-            println!("{}", toc);
-            println!("words: {}", words);
-        };
-        rt.block_on(future);
+        let book = Book::load("./test-book/src").await.unwrap();
+        let toc = book.get_table_of_contents(true);
+        let words = toc.split_whitespace().count();
+        println!("{}", toc);
+        println!("words: {}", words);
     }
 }
