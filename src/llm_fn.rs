@@ -1,32 +1,41 @@
-use std::{path::PathBuf, sync::OnceLock};
+use std::sync::LazyLock;
 
+use crate::teacher::messages::BookProgress;
 use anyhow::bail;
+use openai::chat::ChatCompletionMessage;
+use schemars::SchemaGenerator;
 
-use crate::config::OpenAIConfig;
+pub static OPENAI_API_KEY: LazyLock<openai::Credentials> = LazyLock::new(|| {
+    let _ = dotenvy::dotenv();
+    let key = dotenvy::var("OPENAI_KEY").unwrap();
+    let base_url = dotenvy::var("OPENAI_BASE_URL").unwrap();
+    openai::Credentials::new(key, base_url)
+});
 
-pub static OPENAI_API_KEY: OnceLock<openai::Credentials> = OnceLock::new();
+pub static AI_MODEL: LazyLock<String> = LazyLock::new(|| {
+    let _ = dotenvy::dotenv();
+    dotenvy::var("AI_MODEL").unwrap()
+});
 
-pub fn set_openai_api_key(config: PathBuf) {
-    let key = std::fs::read_to_string(config).unwrap();
-    let key: openai::Credentials = toml::from_str::<OpenAIConfig>(&key).unwrap().into();
-    OPENAI_API_KEY.set(key).unwrap();
+pub fn get_json_generator() -> SchemaGenerator {
+    let mut settings = schemars::r#gen::SchemaSettings::default();
+    settings.option_add_null_type = false;
+    settings.option_nullable = false;
+    SchemaGenerator::new(settings)
 }
 
 pub async fn summarize(content: &str, limit: usize) -> anyhow::Result<String> {
     if limit < 10 {
         bail!("limit must be greater than 10");
     }
-    let credentials = OPENAI_API_KEY
-        .get()
-        .ok_or(anyhow::anyhow!("OPENAI_API_KEY is not set"))?
-        .clone();
+    let credentials = OPENAI_API_KEY.clone();
     let prompt = format!(
         "Provide a concise summary of the following text in {} words or less. Return only the summary without any additional text or explanation:\n{}",
         limit, content
     );
-    let summary = openai::chat::ChatCompletion::builder(
-        "gpt-4o-mini",
-        vec![openai::chat::ChatCompletionMessage {
+    let choises = openai::chat::ChatCompletion::builder(
+        AI_MODEL.as_str(),
+        vec![ChatCompletionMessage {
             role: openai::chat::ChatCompletionMessageRole::User,
             content: Some(prompt),
             ..Default::default()
@@ -34,31 +43,28 @@ pub async fn summarize(content: &str, limit: usize) -> anyhow::Result<String> {
     )
     .credentials(credentials)
     .create()
-    .await?
-    .choices[0]
+    .await?;
+    let summary = choises.choices[0]
         .message
         .content
         .clone()
         .ok_or(anyhow::anyhow!("No response from OpenAI"))?;
-    if summary.split_whitespace().count() > limit {
-        bail!("summary is too long");
-    }
     Ok(summary)
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::config::OpenAIConfig;
+pub async fn summarize_progress(
+    messages: Vec<ChatCompletionMessage>,
+    limit: usize,
+) -> anyhow::Result<BookProgress> {
+    todo!()
+}
 
-    use super::*;
-
-    #[tokio::test]
-    async fn test_summarize() {
-        let key = std::fs::read_to_string("./openai_api_key.toml").unwrap();
-        let key: openai::Credentials = toml::from_str::<OpenAIConfig>(&key).unwrap().into();
-        OPENAI_API_KEY.set(key).unwrap();
-        let story = "Once upon a time, there was a young programmer who loved to code. Every day, she would spend hours crafting elegant solutions to complex problems. Her passion for programming grew stronger with each line of code she wrote. One day, she created an amazing application that helped many people. The joy of seeing others benefit from her work made all the late nights worth it. She realized that programming wasn't just about writing code - it was about making a difference in the world.";
-        let summary = summarize(story, 20).await.unwrap();
-        println!("{}", summary);
-    }
+pub fn token_count(content: &str) -> usize {
+    content.len() / 4
+}
+pub fn message_token_count(message: &ChatCompletionMessage) -> usize {
+    message
+        .content
+        .as_ref()
+        .map_or(0, |content| token_count(content))
 }

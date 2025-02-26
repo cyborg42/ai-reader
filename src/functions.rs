@@ -1,19 +1,37 @@
-use poem_openapi::OpenApi;
-use poem_openapi::payload::Json;
+use crate::book::chapter::ChapterNumber;
 
-use crate::book::BookServer;
 
-#[OpenApi]
-impl BookServer {
-    /// get table of contents
-    #[oai(path = "/book_info/table_of_contents", method = "get")]
-    async fn get_table_of_contents(&self) -> Json<String> {
-        Json(format!(""))
-    }
+
+#[derive(Debug)]
+pub enum ChapterStatus {
+    NotStarted,
+    InProgress,
+    Completed,
 }
 
-pub fn get_openapi_json() -> String {
-    poem_openapi::OpenApiService::new(BookServer::default(), "book function server", "1.0")
-        .server("http://localhost:3000/api")
-        .spec()
+pub struct ChapterProgress {
+    pub section_number: ChapterNumber,
+    pub status: ChapterStatus,
+    pub description: String,
 }
+
+pub struct StudyProgressResponse {
+    pub plan: String,
+    pub overall_progress: String,
+    pub chapter_progress: Option<String>,
+}
+
+pub struct UpdateStudyProgressRequest {
+    pub student_id: i64,
+    pub book_id: i64,
+    pub chapter_index: String,
+    pub status: i8,
+    pub description: String,
+}
+
+pub struct UpdateStudyPlanRequest {
+    pub student_id: i64,
+    pub book_id: i64,
+    pub plan: String,
+}
+

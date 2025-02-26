@@ -4,3 +4,4 @@
 /database
 /openai_api_key.toml
 /.VSCodeCounter
+/.env

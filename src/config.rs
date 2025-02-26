@@ -8,14 +8,3 @@ pub struct Config {
     pub store_path: PathBuf,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct OpenAIConfig {
-    api_key: String,
-    base_url: String,
-}
-
-impl From<OpenAIConfig> for openai::Credentials {
-    fn from(config: OpenAIConfig) -> Self {
-        openai::Credentials::new(config.api_key, config.base_url)
-    }
-}

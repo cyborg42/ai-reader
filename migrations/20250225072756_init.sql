@@ -1,11 +1,23 @@
 -- Add migration script here
+-- Enable foreign keys
+PRAGMA foreign_keys = ON;
+
 CREATE TABLE book (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT NOT NULL,
-    author TEXT NOT NULL,
     path TEXT NOT NULL UNIQUE,
-    description TEXT,
-    summary TEXT
+    summary TEXT NOT NULL,
+    author TEXT,
+    description TEXT
+);
+
+CREATE TABLE chapter (
+    book_id INTEGER,
+    chapter_number CHAR(20) NOT NULL,
+    name TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    PRIMARY KEY (book_id, chapter_number),
+    FOREIGN KEY (book_id) REFERENCES book(id) ON DELETE CASCADE
 );
 
 CREATE TABLE student (
@@ -13,33 +25,36 @@ CREATE TABLE student (
     name TEXT NOT NULL
 );
 
-CREATE TABLE study_plan (
+CREATE TABLE book_progress (
     book_id INTEGER,
     student_id INTEGER,
-    plan TEXT NOT NULL,
+    study_plan TEXT NOT NULL,
+    current_progress TEXT NOT NULL,
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
     PRIMARY KEY (book_id, student_id),
     FOREIGN KEY (book_id) REFERENCES book(id) ON DELETE CASCADE,
     FOREIGN KEY (student_id) REFERENCES student(id) ON DELETE CASCADE
 );
 
-CREATE TABLE chapter (
-    book_id INTEGER,
-    index_number CHAR(20) NOT NULL,
-    name TEXT NOT NULL,
-    summary TEXT,
-    PRIMARY KEY (book_id, index_number),
+CREATE TABLE history_message (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    student_id INTEGER NOT NULL,
+    book_id INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    FOREIGN KEY (student_id) REFERENCES student(id) ON DELETE CASCADE,
     FOREIGN KEY (book_id) REFERENCES book(id) ON DELETE CASCADE
 );
 
-CREATE TABLE learning_progress (
-    student_id INTEGER,
-    book_id INTEGER,
-    chapter_index CHAR(20) NOT NULL,
-    status TINYINT CHECK(status BETWEEN 0 AND 2),
-    description TEXT,
-    update_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (student_id, book_id, chapter_index),
+CREATE TABLE chapter_progress (
+    student_id INTEGER NOT NULL,
+    book_id INTEGER NOT NULL,
+    chapter_number CHAR(20) NOT NULL,
+    status INTEGER CHECK(status BETWEEN 0 AND 2) NOT NULL,
+    description TEXT NOT NULL,
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    PRIMARY KEY (student_id, book_id, chapter_number),
     FOREIGN KEY (student_id) REFERENCES student(id) ON DELETE CASCADE,
     FOREIGN KEY (book_id) REFERENCES book(id) ON DELETE CASCADE,
-    FOREIGN KEY (chapter_index) REFERENCES chapter(index_number) ON DELETE CASCADE
+    FOREIGN KEY (book_id, chapter_number) REFERENCES chapter(book_id, chapter_number) ON DELETE CASCADE
 );

@@ -2,10 +2,17 @@ use std::{path::PathBuf, sync::LazyLock};
 
 use time::UtcOffset;
 
-static LOCAL_OFFSET: LazyLock<UtcOffset> =
-    LazyLock::new(|| time::UtcOffset::current_local_offset().expect("failed to get local offset"));
+pub static LOCAL_OFFSET: LazyLock<UtcOffset> =
+    LazyLock::new(|| match time::UtcOffset::current_local_offset() {
+        Ok(offset) => offset,
+        Err(e) => {
+            tracing::error!("failed to get local offset: {}", e);
+            time::UtcOffset::UTC
+        }
+    });
 
 pub fn now_local() -> time::OffsetDateTime {
+    // time::OffsetDateTime::now_local() is hard to use and has performance issue
     time::OffsetDateTime::now_utc().to_offset(*LOCAL_OFFSET)
 }
 
