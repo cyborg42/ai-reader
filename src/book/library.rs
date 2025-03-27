@@ -1,19 +1,17 @@
 use std::path::{Path, PathBuf};
 
 use super::book::{Book, BookInfo};
-use super::chapter::{Chapter, ChapterInfo, ChapterNumber};
 use dashmap::DashMap;
 use dashmap::mapref::one::Ref;
 
-use crate::llm_fn;
 use sqlx::SqlitePool;
 use tracing::{error, info};
 
 #[derive(Debug, Clone)]
 pub struct Library {
-    books: DashMap<i64, Book>,
-    bookbase: PathBuf,
-    database: SqlitePool,
+    pub books: DashMap<i64, Book>,
+    pub bookbase: PathBuf,
+    pub database: SqlitePool,
 }
 
 impl Default for Library {
@@ -46,7 +44,7 @@ impl Library {
         Ok(server)
     }
 
-    async fn get_book(&self, id: i64) -> anyhow::Result<Ref<i64, Book>> {
+    pub async fn get_book(&self, id: i64) -> anyhow::Result<Ref<i64, Book>> {
         if let Some(book) = self.books.get(&id) {
             Ok(book)
         } else {
@@ -59,7 +57,9 @@ impl Library {
         let path = sqlx::query_scalar!("select path from book where id = ?", id)
             .fetch_one(&self.database)
             .await?;
-        let book = Book::load(self.bookbase.join(path)).await?;
+        let book = Book::load(self.bookbase.join(path))
+            .await?
+            .build(id, self.database.clone());
         self.books.insert(id, book);
         Ok(())
     }
@@ -70,50 +70,18 @@ impl Library {
             .await?;
         for r in books {
             let book = match Book::load(self.bookbase.join(&r.path)).await {
-                Ok(book) => book,
+                Ok(book) => book.build(r.id, self.database.clone()),
                 Err(e) => {
                     error!("load book {} failed: {}", r.path, e);
                     continue;
                 }
             };
-            self.books.insert(r.id.unwrap(), book);
+            self.books.insert(r.id, book);
         }
-        Ok(())
-    }
-
-    async fn get_book_summary(&self, book_id: i64) -> anyhow::Result<String> {
-        let summary = sqlx::query_scalar!("select summary from book where id = ?", book_id)
-            .fetch_one(&self.database)
-            .await?;
-        Ok(summary)
-    }
-
-    async fn generate_book_summary(&self, book_id: i64) -> anyhow::Result<()> {
-        let book = self.get_book(book_id).await?;
-        let description = match book.description.as_ref() {
-            Some(description) => format!("## Description\n{}\n\n", description),
-            None => String::new(),
-        };
-        let mut summary_all = format!(
-            "# Book Title: {}\n\n{}## Chapter Summary\n\n",
-            book.title, description
-        );
-        for ch in book.iter() {
-            let ch_summary = ch.get_chapter_summary(book_id, &self.database).await?;
-            summary_all.push_str(&format!(
-                "### {} {}: \n{}\n\n",
-                ch.number, ch.name, ch_summary
-            ));
-        }
-        let summary = llm_fn::summarize(&summary_all, 1000).await?;
-        sqlx::query!("update book set summary = ? where id = ?", summary, book_id)
-            .execute(&self.database)
-            .await?;
         Ok(())
     }
 
     async fn delete_book_from_db(&self, book_id: i64) -> anyhow::Result<()> {
-        self.books.remove(&book_id);
         sqlx::query!("delete from chapter where book_id = ?", book_id)
             .execute(&self.database)
             .await?;
@@ -128,8 +96,7 @@ impl Library {
         let title = book.title.clone();
         let authors = book.authors.join(",");
         let path = path.as_ref().to_string_lossy().to_string();
-        // path is unique, so this will fail if the book already exists
-        let book_id = if replace {
+        let query = if replace {
             sqlx::query!(
                 r#"replace into book (title, path, author, description, summary) values (?, ?, ?, ?, "")"#,
                 title,
@@ -138,6 +105,7 @@ impl Library {
                 book.description
             )
         } else {
+            // path is unique, so this will fail if the book already exists
             sqlx::query!(
                 r#"insert into book (title, path, author, description, summary) values (?, ?, ?, ?, "")"#,
                 title,
@@ -146,13 +114,14 @@ impl Library {
                 book.description
             )
         };
-        let book_id = book_id.execute(&self.database).await?.last_insert_rowid();
-        self.books.insert(book_id, book);
-        if let Err(e) = self.generate_book_summary(book_id).await {
+        let book_id = query.execute(&self.database).await?.last_insert_rowid();
+        let book = book.build(book_id, self.database.clone());
+        if let Err(e) = book.generate_book_summary().await {
             // if get book summary failed, delete the book from database
             self.delete_book_from_db(book_id).await?;
             return Err(e);
         }
+        self.books.insert(book_id, book);
         info!("add book {}-{} from {} success", book_id, title, path);
         Ok(())
     }
@@ -183,51 +152,9 @@ impl Library {
         Ok(())
     }
 
-    pub async fn get_chapter_content(
-        &mut self,
-        book_id: i64,
-        section_number: ChapterNumber,
-    ) -> anyhow::Result<Chapter> {
-        let book = self.get_book(book_id).await?;
-        let chapter = book
-            .get_chapter(&section_number)
-            .ok_or(anyhow::anyhow!("chapter not found"))?;
-        let chapter = Chapter {
-            name: chapter.name.clone(),
-            content: chapter.content.clone(),
-            number: chapter.number.clone(),
-            parent_names: chapter.parent_names.clone(),
-            path: chapter.path.clone(),
-            sub_nodes: vec![],
-        };
-        Ok(chapter)
-    }
-
     pub async fn get_book_info(&self, book_id: i64) -> anyhow::Result<BookInfo> {
         let book = self.get_book(book_id).await?;
-        let mut chapter_infos = Vec::with_capacity(book.chapters.len());
-        for ch in book.iter() {
-            let chapter_summary = ch.get_chapter_summary(book_id, &self.database).await?;
-            chapter_infos.push(ChapterInfo {
-                name: ch.name.clone(),
-                number: ch.number.clone(),
-                parent_names: ch.parent_names.clone(),
-                path: ch.path.clone(),
-                chapter_summary,
-            });
-        }
-        let book_summary = self.get_book_summary(book_id).await?;
-        let book_info = BookInfo {
-            id: book_id,
-            title: book.title.clone(),
-            table_of_contents: book.get_table_of_contents(),
-            authors: book.authors.clone(),
-            description: book.description.clone(),
-            book_summary,
-            chapter_infos,
-            chapter_numbers: book.chapter_numbers.clone(),
-        };
-        Ok(book_info)
+        book.get_book_info().await
     }
 }
 
@@ -254,7 +181,11 @@ mod tests {
     #[tokio::test]
     async fn test_load_book() {
         let _guard = init_log(None);
-        let book = Book::load("./test-book/src").await.unwrap();
+        let database = SqlitePool::connect(":memory:").await.unwrap();
+        let book = Book::load("./test-book/src")
+            .await
+            .unwrap()
+            .build(0, database);
         let toc = book.get_table_of_contents();
         let words = toc.split_whitespace().count();
         println!("{}", toc);

@@ -18,7 +18,7 @@ touch .env
 echo "DATABASE_URL=sqlite:./database/book.db" >> .env
 
 # need in runtime
-echo "OPENAI_KEY=your_openai_key" >> .env
+echo "OPENAI_API_KEY=your_openai_api_key" >> .env
 echo "OPENAI_BASE_URL=your_openai_base_url" >> .env
 echo "AI_MODEL=model_name" >> .env
 ```
