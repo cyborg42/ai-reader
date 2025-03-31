@@ -3,9 +3,9 @@ pub mod messages;
 use std::sync::Arc;
 
 use async_openai::types::{
-    ChatCompletionMessageToolCall,
-    ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestToolMessage,
-    ChatCompletionRequestUserMessage, CreateChatCompletionRequestArgs,
+    ChatCompletionMessageToolCall, ChatCompletionRequestAssistantMessageArgs,
+    ChatCompletionRequestToolMessage, ChatCompletionRequestUserMessage,
+    CreateChatCompletionRequestArgs,
 };
 use futures::StreamExt;
 use messages::MessagesManager;
@@ -18,16 +18,15 @@ use crate::book::tools::{BookJumpTool, QueryChapterTool};
 
 /// The AI Teacher Agent that interacts with students
 pub struct TeacherAgent {
-    book_id: i64,
-    student_id: i64,
     messages: MessagesManager,
     tool_manager: ToolManager,
 }
 
+#[derive(Debug, Clone)]
 pub enum ResponseEvent {
     Content(String),
     Refusal(String),
-    ToolCalls(ChatCompletionMessageToolCall),
+    ToolCall(ChatCompletionMessageToolCall),
     ToolResult(ChatCompletionRequestToolMessage),
 }
 
@@ -56,8 +55,6 @@ impl TeacherAgent {
         tool_manager.add_tool(query_chapter_tool);
         tool_manager.add_tool(book_jump_tool);
         Ok(Self {
-            book_id,
-            student_id,
             messages,
             tool_manager,
         })
@@ -91,18 +88,18 @@ impl TeacherAgent {
                 }
                 if let Some(refusal) = choice.delta.refusal.as_ref() {
                     whole_refusal.push_str(refusal);
-                    tx.send(ResponseEvent::Refusal(refusal.clone())).await?;
                 }
                 if let Some(tool_call_chunks) = choice.delta.tool_calls {
                     tool_call_manager.merge_chunks(tool_call_chunks);
                 }
             }
-
             let mut message_builder = ChatCompletionRequestAssistantMessageArgs::default();
             if !whole_content.is_empty() {
                 message_builder.content(whole_content);
             }
             if !whole_refusal.is_empty() {
+                tx.send(ResponseEvent::Refusal(whole_refusal.clone()))
+                    .await?;
                 message_builder.refusal(whole_refusal);
             }
             let tool_calls = tool_call_manager.get_tool_calls();
@@ -117,7 +114,7 @@ impl TeacherAgent {
                 break;
             }
             for tool_call in &tool_calls {
-                tx.send(ResponseEvent::ToolCalls(tool_call.clone())).await?;
+                tx.send(ResponseEvent::ToolCall(tool_call.clone())).await?;
             }
             let tool_results = self.tool_manager.call(tool_calls).await;
             for tool_result in &tool_results {

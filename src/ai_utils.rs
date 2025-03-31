@@ -19,7 +19,7 @@ use async_openai::{
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tracing::{error, info};
+use tracing::error;
 
 pub static AI_MODEL: LazyLock<String> = LazyLock::new(|| {
     let _ = dotenvy::dotenv();
@@ -214,7 +214,6 @@ impl ToolManager {
                 tool_call_id: id,
             });
         }
-        info!("Tool calls result: {:?}", outputs);
         outputs
     }
 }

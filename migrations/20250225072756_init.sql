@@ -3,11 +3,9 @@
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE book (
-    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    id INTEGER PRIMARY KEY NOT NULL,
     title TEXT NOT NULL,
-    path TEXT NOT NULL UNIQUE,
-    summary TEXT NOT NULL,
-    author TEXT,
+    authors TEXT NOT NULL,
     description TEXT
 );
 
@@ -15,15 +13,15 @@ CREATE TABLE chapter (
     book_id INTEGER NOT NULL,
     chapter_number CHAR(20) NOT NULL,
     name TEXT NOT NULL,
-    summary TEXT NOT NULL,
-    key_points TEXT NOT NULL,
     PRIMARY KEY (book_id, chapter_number),
     FOREIGN KEY (book_id) REFERENCES book(id) ON DELETE CASCADE
 );
 
 CREATE TABLE student (
     id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
-    name TEXT NOT NULL
+    name TEXT NOT NULL,
+    email TEXT NOT NULL UNIQUE,
+    password TEXT NOT NULL
 );
 
 CREATE TABLE teacher_agent (

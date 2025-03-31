@@ -65,7 +65,7 @@ impl MessagesDatabase {
         Vec<ChatCompletionRequestMessage>,
     )> {
         let mut conversation = vec![];
-        for record in  sqlx::query!(
+        for record in sqlx::query!(
             "select content, update_time from history_message where student_id = ? and book_id = ? order by update_time asc",
             self.student_id,
             self.book_id
@@ -216,8 +216,7 @@ impl MessagesManager {
         auto_save: Option<u64>,
         database: SqlitePool,
     ) -> anyhow::Result<Self> {
-        let book_id = book_info.id;
-        let database = MessagesDatabase::new(book_id, student_id, database).await?;
+        let database = MessagesDatabase::new(book_info.id, student_id, database).await?;
 
         let instruction =
             ChatCompletionRequestMessage::System(database.get_instruction().await?.into());

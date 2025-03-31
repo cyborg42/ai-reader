@@ -1,10 +1,12 @@
 use std::path::{Path, PathBuf};
 
-use super::book::{Book, BookInfo};
+use super::book::{Book, BookInfo, BookMeta};
+use anyhow::bail;
 use dashmap::DashMap;
 use dashmap::mapref::one::Ref;
 
 use sqlx::SqlitePool;
+use tokio::task::{block_in_place, spawn_blocking};
 use tracing::{error, info};
 
 #[derive(Debug, Clone)]
@@ -27,20 +29,13 @@ impl Default for Library {
 
 impl Library {
     /// create a new book server
-    pub async fn new(
-        database: SqlitePool,
-        bookbase: impl AsRef<Path>,
-        scan_new_books: bool,
-    ) -> anyhow::Result<Self> {
+    pub async fn new(database: SqlitePool, bookbase: impl AsRef<Path>) -> anyhow::Result<Self> {
         let server = Self {
             books: DashMap::new(),
             bookbase: bookbase.as_ref().to_path_buf(),
             database,
         };
-        server.load_books_from_db().await?;
-        if scan_new_books {
-            server.add_all_books_to_db(false).await?;
-        }
+        server.restore_db_from_bookbase().await?;
         Ok(server)
     }
 
@@ -48,126 +43,218 @@ impl Library {
         if let Some(book) = self.books.get(&id) {
             Ok(book)
         } else {
-            self.load_book_from_db(id).await?;
+            self.load_book(id).await?;
             Ok(self.books.get(&id).unwrap())
         }
     }
 
-    async fn load_book_from_db(&self, id: i64) -> anyhow::Result<()> {
-        let path = sqlx::query_scalar!("select path from book where id = ?", id)
+    async fn load_book(&self, id: i64) -> anyhow::Result<()> {
+        let _exist = sqlx::query_scalar!("select id from book where id = ?", id)
             .fetch_one(&self.database)
             .await?;
-        let book = Book::load(self.bookbase.join(path))
-            .await?
-            .build(id, self.database.clone());
+        let book = Book::load(self.bookbase.join(format!("book_{}", id))).await?;
+        if id != book.id {
+            bail!("Book ID mismatch: {} != {}", id, book.id);
+        }
         self.books.insert(id, book);
         Ok(())
     }
 
-    async fn load_books_from_db(&self) -> anyhow::Result<()> {
-        let books = sqlx::query!("select id, path from book")
+    pub async fn load_books(&self) -> anyhow::Result<()> {
+        let book_ids: Vec<i64> = sqlx::query_scalar!("select id from book")
             .fetch_all(&self.database)
             .await?;
-        for r in books {
-            let book = match Book::load(self.bookbase.join(&r.path)).await {
-                Ok(book) => book.build(r.id, self.database.clone()),
-                Err(e) => {
-                    error!("load book {} failed: {}", r.path, e);
-                    continue;
-                }
-            };
-            self.books.insert(r.id, book);
+        for id in book_ids {
+            self.load_book(id).await?;
         }
         Ok(())
     }
 
-    async fn delete_book_from_db(&self, book_id: i64) -> anyhow::Result<()> {
+    pub async fn delete_book(&self, book_id: i64) -> anyhow::Result<()> {
+        let path = self.bookbase.join(format!("book_{}", book_id));
         sqlx::query!("delete from chapter where book_id = ?", book_id)
             .execute(&self.database)
             .await?;
         sqlx::query!("delete from book where id = ?", book_id)
             .execute(&self.database)
             .await?;
+        let _ = tokio::fs::remove_dir_all(path).await;
         Ok(())
     }
 
-    async fn add_book_to_db(&self, path: impl AsRef<Path>, replace: bool) -> anyhow::Result<()> {
-        let book = Book::load(&self.bookbase.join(&path)).await?;
-        let title = book.title.clone();
+    pub async fn get_book_info(&self, book_id: i64) -> anyhow::Result<BookInfo> {
+        let book = self.get_book(book_id).await?;
+        let book_path = self.bookbase.join(format!("book_{}", book_id));
+        book.get_book_info(book_path).await
+    }
+
+    async fn store_book_to_db(&self, book: &Book) -> anyhow::Result<()> {
         let authors = book.authors.join(",");
-        let path = path.as_ref().to_string_lossy().to_string();
-        let query = if replace {
+        let description = book.description.clone().unwrap_or_default();
+        sqlx::query!(
+            "insert or replace into book (id, title, authors, description) values (?, ?, ?, ?)",
+            book.id,
+            book.title,
+            authors,
+            description
+        )
+        .execute(&self.database)
+        .await?;
+        sqlx::query!("delete from chapter where book_id = ?", book.id)
+            .execute(&self.database)
+            .await?;
+        for chapter in book.iter() {
+            let number = chapter.number.to_string();
             sqlx::query!(
-                r#"replace into book (title, path, author, description, summary) values (?, ?, ?, ?, "")"#,
-                title,
-                path,
-                authors,
-                book.description
+                "insert or replace into chapter (book_id, chapter_number, name) values (?, ?, ?)",
+                book.id,
+                number,
+                chapter.name
             )
-        } else {
-            // path is unique, so this will fail if the book already exists
-            sqlx::query!(
-                r#"insert into book (title, path, author, description, summary) values (?, ?, ?, ?, "")"#,
-                title,
-                path,
-                authors,
-                book.description
-            )
-        };
-        let book_id = query.execute(&self.database).await?.last_insert_rowid();
-        let book = book.build(book_id, self.database.clone());
-        if let Err(e) = book.generate_book_summary().await {
-            // if get book summary failed, delete the book from database
-            self.delete_book_from_db(book_id).await?;
-            return Err(e);
+            .execute(&self.database)
+            .await?;
         }
-        self.books.insert(book_id, book);
-        info!("add book {}-{} from {} success", book_id, title, path);
         Ok(())
     }
 
-    /// add all books in the bookbase to database
-    async fn add_all_books_to_db(&self, replace: bool) -> anyhow::Result<()> {
-        let mut paths = Vec::new();
-        for entry in walkdir::WalkDir::new(&self.bookbase) {
-            let entry = match entry {
-                Ok(entry) => entry,
+    pub async fn restore_db_from_bookbase(&self) -> anyhow::Result<()> {
+        let mut entries = tokio::fs::read_dir(&self.bookbase).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(Ok(book_id)) = entry
+                .file_name()
+                .to_string_lossy()
+                .strip_prefix("book_")
+                .map(|s| s.parse::<i64>())
+            else {
+                continue;
+            };
+            let existing = sqlx::query!("select id from book where id = ?", book_id)
+                .fetch_optional(&self.database)
+                .await?;
+            if existing.is_some() {
+                continue;
+            }
+            let book = match Book::load(&path).await {
+                Ok(book) => book,
                 Err(e) => {
-                    error!("walkdir error: {}", e);
+                    error!("load book {} failed: {}", path.display(), e);
                     continue;
                 }
             };
-            if entry.file_name() == "book.toml" {
-                if let Ok(rel_path) = entry.path().parent().unwrap().strip_prefix(&self.bookbase) {
-                    let rel_path = rel_path.to_path_buf();
-                    paths.push(rel_path);
-                }
+            if book.id != book_id {
+                error!("Book ID mismatch: {} != {}", book_id, book.id);
+                tokio::fs::remove_dir_all(&path).await?;
+                continue;
             }
+            self.store_book_to_db(&book).await?;
         }
-        for path in paths {
-            if let Err(e) = self.add_book_to_db(&path, replace).await {
+        Ok(())
+    }
+
+    pub async fn upload_book_from_mdbook(&self, path: impl AsRef<Path>) -> anyhow::Result<()> {
+        let path = path.as_ref();
+        let book = Book::load(path).await?;
+
+        // Check if the book already exists in the database
+        let existing = sqlx::query!("SELECT id FROM book WHERE id = ?", book.id)
+            .fetch_optional(&self.database)
+            .await?;
+        if existing.is_some() {
+            bail!("Book with ID {} already exists", book.id);
+        }
+
+        // generate book summary
+        book.get_book_info(&path).await?;
+
+        // Create the book directory in bookbase
+        let book_dir = self.bookbase.join(format!("book_{}", book.id));
+        let _ = tokio::fs::remove_dir_all(&book_dir).await;
+        tokio::fs::create_dir_all(&book_dir).await?;
+
+        // Copy the book files from source path to bookbase/book_id
+        let copy_options = fs_extra::dir::CopyOptions {
+            overwrite: true,
+            skip_exist: false,
+            copy_inside: true,
+            content_only: true,
+            ..Default::default()
+        };
+
+        let path_buf = path.to_path_buf();
+        spawn_blocking(move || fs_extra::dir::copy(path_buf, &book_dir, &copy_options)).await??;
+
+        // Insert or replace book in the database
+        self.store_book_to_db(&book).await?;
+        info!(
+            "add book {}-{} from {} success",
+            book.id,
+            book.title,
+            path.display()
+        );
+        Ok(())
+    }
+
+    pub async fn upload_book(&self, path: impl AsRef<Path>) -> anyhow::Result<()> {
+        let path = path.as_ref();
+        if path.is_dir() {
+            self.upload_book_from_mdbook(path).await?;
+        } else if path.is_file() && path.extension().unwrap_or_default() == "epub" {
+            block_in_place(async || -> anyhow::Result<()> {
+                let output_dir = tempfile::tempdir()?;
+                epub2mdbook::convert_epub_to_mdbook(path, &output_dir, false)?;
+                self.upload_book_from_mdbook(&output_dir).await?;
+                Ok(())
+            })
+            .await?;
+        } else {
+            bail!("Invalid book path: {}", path.display());
+        };
+        Ok(())
+    }
+
+    pub async fn upload_books_in_dir(&self, dir: impl AsRef<Path>) -> anyhow::Result<()> {
+        let mut entries = tokio::fs::read_dir(dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if let Err(e) = self.upload_book(&path).await {
                 error!("add book {} failed: {}", path.display(), e);
             }
         }
         Ok(())
     }
 
-    pub async fn get_book_info(&self, book_id: i64) -> anyhow::Result<BookInfo> {
-        let book = self.get_book(book_id).await?;
-        book.get_book_info().await
+    pub async fn get_book_list(&self) -> anyhow::Result<Vec<BookMeta>> {
+        let books = sqlx::query!("select id, title, authors, description from book")
+            .fetch_all(&self.database)
+            .await?;
+        let mut book_list = Vec::new();
+        for book in books {
+            let book_meta = BookMeta {
+                id: book.id,
+                title: book.title,
+                authors: book.authors.split(',').map(|s| s.to_string()).collect(),
+                description: book.description,
+            };
+            book_list.push(book_meta);
+        }
+        Ok(book_list)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{book::library::Book, utils::init_log};
+    use crate::utils::init_log;
 
     #[tokio::test]
     async fn test_load_books() {
         let _guard = init_log(None);
         let database = SqlitePool::connect("./database/book.db").await.unwrap();
-        let server = Library::new(database, "./test-book", false).await;
+        let server = Library::new(database, "./bookbase").await;
         let server = match server {
             Ok(server) => server,
             Err(e) => {
@@ -175,20 +262,6 @@ mod tests {
                 return;
             }
         };
-        server.add_all_books_to_db(false).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_load_book() {
-        let _guard = init_log(None);
-        let database = SqlitePool::connect(":memory:").await.unwrap();
-        let book = Book::load("./test-book/src")
-            .await
-            .unwrap()
-            .build(0, database);
-        let toc = book.get_table_of_contents();
-        let words = toc.split_whitespace().count();
-        println!("{}", toc);
-        println!("words: {}", words);
+        server.upload_books_in_dir("./test-book").await.unwrap();
     }
 }

@@ -7,7 +7,7 @@ use mdbook::book::{self, SectionNumber};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
-use sqlx::SqlitePool;
+use tracing::info;
 use std::{
     fmt::{self, Display, Formatter},
     ops::{Deref, DerefMut},
@@ -28,64 +28,42 @@ pub struct Chapter {
     pub sub_chapters: Vec<Chapter>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChapterSummary {
+    pub summary: String,
+    pub key_points: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ChapterInfo {
     pub name: String,
     pub number: ChapterNumber,
     pub parent_names: Vec<String>,
     pub path: Option<PathBuf>,
-    pub summary: String,
-    pub key_points: Vec<String>,
+    #[serde(flatten)]
+    pub summary: ChapterSummary,
 }
 
 impl Chapter {
-    pub async fn get_chapter_summary(
-        &self,
-        book_id: i64,
-        database: &SqlitePool,
-    ) -> anyhow::Result<(String, Vec<String>)> {
-        let number = self.number.to_string();
-        let summary = sqlx::query!(
-            "SELECT summary, key_points FROM chapter WHERE book_id = ? AND chapter_number = ?",
-            book_id,
-            number
-        )
-        .fetch_optional(database)
-        .await?;
-        if let Some(record) = summary {
-            return Ok((record.summary, serde_json::from_str(&record.key_points)?));
-        }
+    pub async fn generate_chapter_summary(&self) -> anyhow::Result<ChapterSummary> {
+        info!("generating summary for chapter: {}-{}", self.number, self.name);
         let summary = ai_utils::summarize(&self.content, 100).await?;
         let key_points = ai_utils::extract_key_points(&self.content).await?;
-        let number = self.number.to_string();
-        let key_points_str = serde_json::to_string(&key_points)?;
-        sqlx::query!(
-            "REPLACE INTO chapter (book_id, chapter_number, name, summary, key_points) VALUES (?, ?, ?, ?, ?)",
-            book_id,
-            number,
-            self.name,
+        info!("generating summary for chapter done: {}-{}", self.number, self.name);
+        Ok(ChapterSummary {
             summary,
-            key_points_str
-        )
-        .execute(database)
-        .await?;
-        Ok((summary, key_points))
+            key_points,
+        })
     }
 
-    pub async fn get_chapter_info(
-        &self,
-        book_id: i64,
-        database: &SqlitePool,
-    ) -> anyhow::Result<ChapterInfo> {
-        let (summary, key_points) = self.get_chapter_summary(book_id, database).await?;
-        Ok(ChapterInfo {
+    pub fn get_chapter_info(&self, summary: ChapterSummary) -> ChapterInfo {
+        ChapterInfo {
             name: self.name.clone(),
             number: self.number.clone(),
             parent_names: self.parent_names.clone(),
             path: self.path.clone(),
             summary,
-            key_points,
-        })
+        }
     }
 }
 

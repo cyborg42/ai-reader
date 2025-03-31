@@ -1,40 +1,25 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, btree_map::Entry},
     hash::{DefaultHasher, Hash, Hasher},
     path::{Path, PathBuf},
 };
 
 use crate::ai_utils;
 
-use super::chapter::{Chapter, ChapterInfo, ChapterNumber};
+use super::chapter::{Chapter, ChapterInfo, ChapterNumber, ChapterSummary};
 use anyhow::bail;
 use mdbook::book;
-use serde::Serialize;
-use sqlx::SqlitePool;
+use serde::{Deserialize, Serialize};
 use tracing::{error, info};
 use tree_iter::{
     iter::TreeIter,
     prelude::{DepthFirst, TreeIterMut},
 };
 
-#[derive(Debug, Clone, Default)]
-pub struct BookRaw {
-    pub title: String,
-    pub chapters: BTreeMap<ChapterNumber, Chapter>,
-    pub authors: Vec<String>,
-    pub description: Option<String>,
-}
-impl BookRaw {
-    pub fn build(self, id: i64, database: SqlitePool) -> Book {
-        Book {
-            id,
-            title: self.title,
-            chapters: self.chapters,
-            authors: self.authors,
-            description: self.description,
-            database,
-        }
-    }
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Summary {
+    pub book_summary: Option<String>,
+    pub chapter_summaries: BTreeMap<ChapterNumber, ChapterSummary>,
 }
 
 #[derive(Debug, Clone)]
@@ -44,19 +29,7 @@ pub struct Book {
     pub chapters: BTreeMap<ChapterNumber, Chapter>,
     pub authors: Vec<String>,
     pub description: Option<String>,
-    pub database: SqlitePool,
 }
-
-impl Hash for Book {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.id.hash(state);
-        self.title.hash(state);
-        self.authors.hash(state);
-        self.description.hash(state);
-        self.chapters.hash(state);
-    }
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct BookInfo {
     #[serde(skip_serializing)]
@@ -71,12 +44,18 @@ pub struct BookInfo {
     pub book_summary: String,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub chapter_infos: BTreeMap<ChapterNumber, ChapterInfo>,
-    #[serde(skip_serializing)]
-    pub book_hash: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BookMeta {
+    pub id: i64,
+    pub title: String,
+    pub authors: Vec<String>,
+    pub description: Option<String>,
 }
 
 impl Book {
-    pub async fn load(root_dir: impl AsRef<Path>) -> anyhow::Result<BookRaw> {
+    pub async fn load(root_dir: impl AsRef<Path>) -> anyhow::Result<Book> {
         let root_dir = root_dir.as_ref();
         info!("Loading book from {}", root_dir.display());
         let file_name = root_dir
@@ -85,7 +64,7 @@ impl Book {
             .ok_or(anyhow::anyhow!("invalid root dir"))?
             .to_string_lossy()
             .to_string();
-        let book_toml_content = std::fs::read_to_string(root_dir.join("book.toml"))?;
+        let book_toml_content = tokio::fs::read_to_string(root_dir.join("book.toml")).await?;
         let book_cfg = toml::from_str::<mdbook::config::Config>(&book_toml_content)?.book;
         let src_dir = root_dir.join(book_cfg.src);
         let build_config = mdbook::config::BuildConfig {
@@ -97,7 +76,8 @@ impl Book {
 
         let title = book_cfg.title.unwrap_or(file_name);
 
-        let mut book = BookRaw {
+        let mut book = Book {
+            id: 0,
             title,
             chapters: BTreeMap::new(),
             authors: book_cfg.authors,
@@ -139,10 +119,19 @@ impl Book {
             error!("chapter number is not unique, path: {}", root_dir.display());
             bail!("chapter number is not unique");
         }
+        let mut hasher = DefaultHasher::new();
+        book.title.hash(&mut hasher);
+        book.authors.hash(&mut hasher);
+        book.description.hash(&mut hasher);
+        book.chapters.hash(&mut hasher);
+        book.id = (hasher.finish() as i64).abs();
         Ok(book)
     }
 
-    pub async fn generate_book_summary(&self) -> anyhow::Result<()> {
+    async fn generate_book_summary(
+        &self,
+        chapter_infos: &BTreeMap<ChapterNumber, ChapterInfo>,
+    ) -> anyhow::Result<String> {
         let description = match self.description.as_ref() {
             Some(description) => format!("## Description\n{}\n\n", description),
             None => String::new(),
@@ -151,41 +140,56 @@ impl Book {
             "# Book Title: {}\n\n{}## Chapter Summary\n\n",
             self.title, description
         );
-        for ch in self.iter() {
-            let (ch_summary, ch_objectives) =
-                ch.get_chapter_summary(self.id, &self.database).await?;
+        for ch in chapter_infos.values() {
             summary_all.push_str(&format!(
-                "### {} {}: \nsummary: {}\nobjectives: {}\n\n",
+                "### {} {}: \nsummary: {}\nkey_points: {}\n\n",
                 ch.number,
                 ch.name,
-                ch_summary,
-                ch_objectives.join(", ")
+                ch.summary.summary,
+                ch.summary.key_points.join(", ")
             ));
         }
+        info!("generating summary for book: {}", self.title);
         let summary = ai_utils::summarize(&summary_all, 1000).await?;
-        sqlx::query!("update book set summary = ? where id = ?", summary, self.id)
-            .execute(&self.database)
-            .await?;
-        Ok(())
-    }
-
-    pub async fn get_book_summary(&self) -> anyhow::Result<String> {
-        let summary = sqlx::query_scalar!("select summary from book where id = ?", self.id)
-            .fetch_one(&self.database)
-            .await?;
+        info!("generating summary for book done: {}", self.title);
         Ok(summary)
     }
 
-    pub async fn get_book_info(&self) -> anyhow::Result<BookInfo> {
+    pub async fn get_book_info(&self, book_path: impl AsRef<Path>) -> anyhow::Result<BookInfo> {
+        let summary_path = book_path.as_ref().join("summary.toml");
+        let mut changed = false;
+        let mut summary = match tokio::fs::read_to_string(&summary_path)
+            .await
+            .map(|s| toml::from_str::<Summary>(&s))
+        {
+            Ok(Ok(summary)) => summary,
+            _ => Summary::default(),
+        };
+
         let mut chapter_infos = BTreeMap::new();
         for ch in self.iter() {
-            let chapter_info = ch.get_chapter_info(self.id, &self.database).await?;
+            let ch_summary = match summary.chapter_summaries.entry(ch.number.clone()) {
+                Entry::Vacant(o) => {
+                    changed = true;
+                    o.insert(ch.generate_chapter_summary().await?).clone()
+                }
+                Entry::Occupied(o) => o.get().clone(),
+            };
+            let chapter_info = ch.get_chapter_info(ch_summary);
             chapter_infos.insert(ch.number.clone(), chapter_info);
         }
-        let book_summary = self.get_book_summary().await?;
-        let mut hasher = DefaultHasher::new();
-        self.hash(&mut hasher);
-        let book_hash = hasher.finish();
+        let book_summary = match &summary.book_summary {
+            Some(book_summary) => book_summary.clone(),
+            None => {
+                let book_summary = self.generate_book_summary(&chapter_infos).await?;
+                summary.book_summary = Some(book_summary.clone());
+                changed = true;
+                book_summary
+            }
+        };
+        if changed {
+            tokio::fs::write(&summary_path, toml::to_string(&summary)?).await?;
+        }
         let book_info = BookInfo {
             id: self.id,
             title: self.title.clone(),
@@ -195,7 +199,6 @@ impl Book {
             book_summary,
             chapter_infos,
             chapter_numbers: self.chapters.keys().cloned().collect(),
-            book_hash,
         };
         Ok(book_info)
     }

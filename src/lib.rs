@@ -5,4 +5,4 @@ pub mod ai_utils;
 pub mod utils;
 pub mod server;
 pub mod teacher;
-
+pub mod student;
