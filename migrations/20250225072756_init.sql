@@ -28,7 +28,7 @@ CREATE TABLE teacher_agent (
     book_id INTEGER NOT NULL,
     student_id INTEGER NOT NULL,
     current_chapter_number CHAR(20) NOT NULL,
-    notes TEXT NOT NULL,
+    memories TEXT NOT NULL,
     update_time DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
     PRIMARY KEY (book_id, student_id),
     FOREIGN KEY (book_id) REFERENCES book(id) ON DELETE CASCADE,
@@ -62,7 +62,6 @@ CREATE TABLE agent_setting (
     id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     ai_model TEXT NOT NULL,
     token_budget INTEGER NOT NULL,
-    auto_save INTEGER
  );
 
  INSERT INTO agent_setting (ai_model, token_budget, auto_save) VALUES ('grok-2-latest', 100000, 10000);

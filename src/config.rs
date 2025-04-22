@@ -7,4 +7,3 @@ pub struct Config {
     pub book_path: PathBuf,
     pub store_path: PathBuf,
 }
-

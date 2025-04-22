@@ -128,9 +128,7 @@ pub trait Tool: Send + Sync {
 }
 
 pub trait ToolDyn: Send + Sync {
-    fn name(&self) -> String
-    where
-        Self: Sized;
+    fn name(&self) -> String;
     fn definition(&self) -> ChatCompletionTool;
     fn call(
         &self,
@@ -149,7 +147,9 @@ impl<T: Tool> ToolDyn for T {
         args: String,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send + '_>> {
         let future = async move {
-            match serde_json::from_str::<T::Args>(&args) {
+            match serde_json::from_str::<T::Args>(&args)
+                .or_else(|e| serde_json::from_str::<T::Args>(&"null").map_err(|_| e))
+            {
                 Ok(args) => T::call(self, args).await.and_then(|output| {
                     serde_json::to_string(&output)
                         .map_err(|e| anyhow::anyhow!("Failed to serialize output: {}", e))
@@ -169,9 +169,9 @@ impl ToolManager {
     pub fn add_tool(&mut self, tool: impl Tool + 'static) {
         self.tools.insert(tool.name(), Arc::new(tool));
     }
-    pub fn add_tools(&mut self, tools: impl IntoIterator<Item = impl Tool + 'static>) {
+    pub fn add_tools(&mut self, tools: impl IntoIterator<Item = Arc<dyn ToolDyn>>) {
         for tool in tools {
-            self.add_tool(tool);
+            self.tools.insert(tool.name(), tool);
         }
     }
     pub fn get_tools(&self) -> Vec<ChatCompletionTool> {
@@ -218,11 +218,21 @@ impl ToolManager {
     }
 }
 
-pub async fn summarize(content: &str, limit: usize) -> anyhow::Result<String> {
-    let prompt = format!(
-        "Provide a concise summary of the following text in {} words or less. Return only the summary without any additional text or explanation:\n{}",
-        limit, content
-    );
+pub async fn summarize(
+    content: &str,
+    limit: usize,
+    prompt: Option<String>,
+) -> anyhow::Result<String> {
+    let prompt = match prompt {
+        Some(prompt) => format!(
+            "{prompt}\n\nProvide a concise result of the following text in {} words or less. Return only the result without any additional text or explanation:\n{}",
+            limit, content
+        ),
+        None => format!(
+            "Provide a concise summary of the following text in {} words or less. Return only the summary without any additional text or explanation:\n{}",
+            limit, content
+        ),
+    };
     let request = CreateChatCompletionRequestArgs::default()
         .model(AI_MODEL.as_str())
         .messages(vec![ChatCompletionRequestMessage::User(prompt.into())])
@@ -352,7 +362,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        book::chapter::{Chapter, ChapterNumber},
+        book::chapter::{ChapterNumber, ChapterRaw},
         utils::init_log,
     };
 
@@ -360,11 +370,11 @@ mod tests {
     async fn test_tool_manager() {
         let _guard = init_log(None);
         struct QueryChapterTool {
-            chapters: BTreeMap<ChapterNumber, Chapter>,
+            chapters: BTreeMap<ChapterNumber, ChapterRaw>,
         }
         impl Tool for QueryChapterTool {
             type Args = ChapterNumber;
-            type Output = Chapter;
+            type Output = ChapterRaw;
             fn name(&self) -> String {
                 "QueryChapterTool".to_string()
             }
@@ -380,7 +390,7 @@ mod tests {
                 }
             }
         }
-        let chapter1 = Chapter {
+        let chapter1 = ChapterRaw {
             name: "chapter1".to_string(),
             number: ChapterNumber::from_iter(vec![1]),
             parent_names: vec![],

@@ -7,67 +7,113 @@ use mdbook::book::{self, SectionNumber};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
-use tracing::info;
 use std::{
     fmt::{self, Display, Formatter},
     ops::{Deref, DerefMut},
 };
+use tracing::info;
 use tree_iter::iter::TreeNode;
 use tree_iter::prelude::TreeNodeMut;
+use utoipa::ToSchema;
 
 use crate::ai_utils;
 
 #[derive(Debug, Clone, Default, Serialize, Hash)]
-pub struct Chapter {
+pub struct ChapterRaw {
     pub name: String,
     pub number: ChapterNumber,
     pub parent_names: Vec<String>,
     pub path: Option<PathBuf>,
     pub content: String,
     #[serde(skip_serializing)]
-    pub sub_chapters: Vec<Chapter>,
+    pub sub_chapters: Vec<ChapterRaw>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChapterSummary {
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ChapterPlan {
+    pub plan: String,
     pub summary: String,
-    pub key_points: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct ChapterInfo {
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct Chapter {
     pub name: String,
     pub number: ChapterNumber,
-    pub parent_names: Vec<String>,
+    #[serde(skip_serializing)]
+    #[schema(ignore)]
     pub path: Option<PathBuf>,
+    pub content: String,
     #[serde(flatten)]
-    pub summary: ChapterSummary,
+    pub chapter_plan: ChapterPlan,
 }
 
-impl Chapter {
-    pub async fn generate_chapter_summary(&self) -> anyhow::Result<ChapterSummary> {
-        info!("generating summary for chapter: {}-{}", self.number, self.name);
-        let summary = ai_utils::summarize(&self.content, 100).await?;
-        let key_points = ai_utils::extract_key_points(&self.content).await?;
-        info!("generating summary for chapter done: {}-{}", self.number, self.name);
-        Ok(ChapterSummary {
+impl ChapterRaw {
+    pub async fn generate_chapter_plan(&self) -> anyhow::Result<ChapterPlan> {
+        info!(
+            "generating chapter plan for chapter: {} {}",
+            self.number, self.name
+        );
+        let prompt = r#"Generate a teaching plan for the following chapter.
+Example:
+```
+# Chapter Plan for Chapter 3: Verb Tenses
+
+## Chapter Objectives
+- Understand how verb tenses express time in English.
+- Master the use of simple present, past, and future tenses.
+- Learn to apply progressive and perfect tenses correctly.
+
+## Teaching Outline
+1. **Introduction to Verb Tenses**:
+   - Explain what tenses are and why they matter.
+   - Introduce the three main time frames: past, present, and future.
+
+2. **Simple Tenses**:
+   - **Present Simple**: Teach its uses (habits, facts), structure, and examples.
+   - **Past Simple**: Cover regular/irregular verbs and common uses.
+   - **Future Simple**: Explain "will" vs. "going to" for predictions and plans.
+
+3. **Progressive Tenses**:
+   - **Present Progressive**: Focus on ongoing actions and temporary states.
+   - **Past Progressive**: Teach interrupted or simultaneous past actions.
+   - **Future Progressive**: Cover planned or predicted ongoing actions.
+
+4. **Perfect Tenses**:
+   - **Present Perfect**: Discuss completed actions affecting the present.
+   - **Past Perfect**: Explain actions finished before another past event.
+   - **Future Perfect**: Teach actions completed by a future point.
+
+## Activities and Methods
+- **Tailored Examples**: Use sentences relevant to the student's interests to explain tenses.
+- **Practice Exercises**: Provide worksheets with fill-in-the-blank and sentence rewriting tasks.
+- **Error Correction**: Work together to fix tense-related mistakes in sample sentences.
+- **End-of-Chapter Quiz**: Test the student's grasp of the chapter's concepts.
+
+## Next Steps
+- Assign homework to reinforce tense usage.
+- Prepare for the next chapter ("Subject-Verb Agreement") by linking it to tense knowledge.
+```"#;
+        let chapter_plan =
+            ai_utils::summarize(&self.content, 1000, Some(prompt.to_string())).await?;
+        let summary = ai_utils::summarize(&self.content, 100, None).await?;
+        Ok(ChapterPlan {
+            plan: chapter_plan,
             summary,
-            key_points,
         })
     }
 
-    pub fn get_chapter_info(&self, summary: ChapterSummary) -> ChapterInfo {
-        ChapterInfo {
+    pub fn to_chapter(&self, chapter_plan: ChapterPlan) -> Chapter {
+        Chapter {
             name: self.name.clone(),
             number: self.number.clone(),
-            parent_names: self.parent_names.clone(),
             path: self.path.clone(),
-            summary,
+            content: self.content.clone(),
+            chapter_plan,
         }
     }
 }
 
-impl Chapter {
+impl ChapterRaw {
     pub fn get_toc_item(&self) -> String {
         let indent = if let Some(i) = self.number.0.first() {
             if [0, -1].contains(i) {
@@ -92,9 +138,9 @@ impl Chapter {
     }
 }
 
-impl From<book::Chapter> for Chapter {
+impl From<book::Chapter> for ChapterRaw {
     fn from(ch: book::Chapter) -> Self {
-        let mut chapter = Chapter {
+        let mut chapter = ChapterRaw {
             name: ch.name,
             content: ch.content,
             number: ch.number.unwrap_or_default().into(),
@@ -111,20 +157,22 @@ impl From<book::Chapter> for Chapter {
     }
 }
 
-impl TreeNode for Chapter {
+impl TreeNode for ChapterRaw {
     fn children(&self) -> impl DoubleEndedIterator<Item = &Self> {
         self.sub_chapters.iter()
     }
 }
 
-impl TreeNodeMut for Chapter {
+impl TreeNodeMut for ChapterRaw {
     fn children_mut(&mut self) -> impl DoubleEndedIterator<Item = &mut Self> {
         self.sub_chapters.iter_mut()
     }
 }
+
 /// A section number like "1.2.3."
-#[derive(Debug, PartialEq, Clone, Default, Eq, Hash)]
+#[derive(Debug, PartialEq, Clone, Default, Eq, Hash, ToSchema)]
 pub struct ChapterNumber(pub Vec<i64>);
+
 impl JsonSchema for ChapterNumber {
     fn schema_name() -> String {
         "ChapterNumber".to_string()
@@ -150,12 +198,6 @@ impl JsonSchema for ChapterNumber {
     }
 }
 
-#[test]
-fn t() {
-    let s = serde_json::json!(schemars::schema_for!(ChapterNumber));
-    println!("{:#?}", s);
-}
-
 impl Display for ChapterNumber {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         for item in &self.0 {
@@ -164,6 +206,7 @@ impl Display for ChapterNumber {
         Ok(())
     }
 }
+
 impl Serialize for ChapterNumber {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -172,6 +215,7 @@ impl Serialize for ChapterNumber {
         serializer.serialize_str(&self.to_string())
     }
 }
+
 impl<'de> Deserialize<'de> for ChapterNumber {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where

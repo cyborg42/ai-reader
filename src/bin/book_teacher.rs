@@ -36,6 +36,11 @@ enum Commands {
         #[command(subcommand)]
         command: UserCommand,
     },
+    Login {
+        id: i64,
+        #[command(subcommand)]
+        command: LoginCommand,
+    },
 }
 
 #[derive(Debug, clap::Subcommand)]
@@ -60,24 +65,24 @@ enum UserCommand {
     Delete {
         id: i64,
     },
-    Login {
-        id: i64,
-        #[command(subcommand)]
-        command: LoginCommand,
-    },
 }
 
 #[derive(Debug, clap::Subcommand)]
 enum LoginCommand {
-    Learn { book_id: i64 },
     ListBooks,
+    Learn { book_id: i64 },
     Delete { book_id: i64 },
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() {
     let _guard = init_log(None);
     let args = Args::parse();
+    if let Err(e) = run(args).await {
+        eprintln!("{:?}", e);
+    }
+}
+async fn run(args: Args) -> anyhow::Result<()> {
     let database = SqlitePool::connect(&args.database.to_string_lossy()).await?;
     let library = Library::new(database.clone(), args.bookbase).await?;
 
@@ -117,22 +122,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 delete_student(&database, id).await?;
                 println!("Student deleted with id: {}", id);
             }
-            UserCommand::Login { id, command } => match command {
-                LoginCommand::Learn { book_id } => {
-                    let teacher =
-                        TeacherAgent::new(Arc::new(library), id, book_id, database.clone()).await?;
-                    start_learning(teacher).await?;
+        },
+        Commands::Login { id, command } => match command {
+            LoginCommand::Learn { book_id } => {
+                let teacher =
+                    TeacherAgent::new(Arc::new(library), id, book_id, database.clone()).await?;
+                start_learning(teacher).await?;
+            }
+            LoginCommand::ListBooks => {
+                for book in get_student_books(&database, id).await? {
+                    println!("{:<20} {}", book.id, book.title);
                 }
-                LoginCommand::ListBooks => {
-                    for book in get_student_books(&database, id).await? {
-                        println!("{:<20} {}", book.id, book.title);
-                    }
-                }
-                LoginCommand::Delete { book_id } => {
-                    delete_student_book(&database, id, book_id).await?;
-                    println!("Book deleted with id: {}", book_id);
-                }
-            },
+            }
+            LoginCommand::Delete { book_id } => {
+                delete_student_book(&database, id, book_id).await?;
+                println!("Book deleted with id: {}", book_id);
+            }
         },
     }
     Ok(())
@@ -149,7 +154,7 @@ enum CurrentScene {
 
 async fn start_learning(mut teacher: TeacherAgent) -> anyhow::Result<()> {
     loop {
-        println!("[Student]:");
+        println!("\n[Student]:");
         let stdin = tokio::io::stdin();
         let mut reader = BufReader::new(stdin);
         let mut input = String::new();
@@ -170,7 +175,7 @@ async fn start_learning(mut teacher: TeacherAgent) -> anyhow::Result<()> {
                         match content {
                             ResponseEvent::Content(content) => {
                                 if scene != CurrentScene::Content {
-                                    stdout.write_all(b"[Teacher]:\n").await?;
+                                    stdout.write_all(b"\n[Teacher]:\n").await?;
                                     stdout.flush().await?;
                                     scene = CurrentScene::Content;
                                 }
@@ -183,9 +188,7 @@ async fn start_learning(mut teacher: TeacherAgent) -> anyhow::Result<()> {
                                     stdout.flush().await?;
                                     scene = CurrentScene::Refusal;
                                 }
-                                stdout
-                                    .write_all(format!("{}\n", refusal).as_bytes())
-                                    .await?;
+                                stdout.write_all(format!("{}", refusal).as_bytes()).await?;
                                 stdout.flush().await?;
                             }
                             ResponseEvent::ToolCall(call) => {
@@ -194,9 +197,7 @@ async fn start_learning(mut teacher: TeacherAgent) -> anyhow::Result<()> {
                                     stdout.flush().await?;
                                     scene = CurrentScene::ToolCall;
                                 }
-                                stdout
-                                    .write_all(format!("{:#?}\n", call).as_bytes())
-                                    .await?;
+                                stdout.write_all(format!("{:#?}", call).as_bytes()).await?;
                                 stdout.flush().await?;
                             }
                             ResponseEvent::ToolResult(result) => {
@@ -206,7 +207,7 @@ async fn start_learning(mut teacher: TeacherAgent) -> anyhow::Result<()> {
                                     scene = CurrentScene::ToolResult;
                                 }
                                 stdout
-                                    .write_all(format!("{:#?}\n", result).as_bytes())
+                                    .write_all(format!("{:#?}", result).as_bytes())
                                     .await?;
                                 stdout.flush().await?;
                             }

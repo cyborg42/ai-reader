@@ -1,7 +1,8 @@
 pub mod progress;
+pub mod tools;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    mem::take,
+    sync::Arc,
 };
 
 use anyhow::bail;
@@ -9,11 +10,15 @@ use async_openai::types::ChatCompletionRequestMessage;
 use progress::{BookProgress, ChapterObjective, ChapterProgress, ChapterStatus};
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
-use tracing::warn;
+use tools::{AddMemoryTool, GetBookProgressTool, ProgressUpdateTool};
 
-use crate::{book::book::BookInfo, ai_utils::Tokens};
+use crate::{
+    ai_utils::{Tokens, ToolDyn},
+    book::{book::Book, chapter::ChapterNumber},
+};
 
-struct MessagesDatabase {
+#[derive(Debug, Clone)]
+pub struct MessagesDatabase {
     book_id: i64,
     student_id: i64,
     database: SqlitePool,
@@ -22,7 +27,7 @@ struct MessagesDatabase {
 impl MessagesDatabase {
     pub async fn new(book_id: i64, student_id: i64, database: SqlitePool) -> anyhow::Result<Self> {
         sqlx::query!(
-            "insert or ignore into teacher_agent (student_id, book_id, current_chapter_number, notes) values (?, ?, '', '[]')",
+            "insert or ignore into teacher_agent (student_id, book_id, current_chapter_number, memories) values (?, ?, '', '[]')",
             student_id,
             book_id,
         )
@@ -39,64 +44,61 @@ impl MessagesDatabase {
             sqlx::query_scalar!("select name from student where id = ?", self.student_id)
                 .fetch_one(&self.database)
                 .await?;
-        let book_title = sqlx::query_scalar!("select title from book where id = ?", self.book_id)
+        let book_name = sqlx::query_scalar!("select title from book where id = ?", self.book_id)
             .fetch_one(&self.database)
             .await?;
         let instruction = format!(
-            "You are an expert AI teaching assistant for {student_name}, who is studying '{book_title}'. Your personality is patient, encouraging, and clear.\n\n\
-                Core responsibilities:\n\
-                - Help understand complex concepts through examples and analogies\n\
-                - Answer questions by referencing specific book content\n\
-                - Use the student's progress data to provide personalized guidance\n\
-                - Encourage critical thinking with Socratic questioning\n\
-                - Correct misconceptions gently and clearly\n\n\
-                When appropriate, suggest specific chapters or sections to review based on their progress. \
-                Focus on building understanding rather than providing complete solutions. \
-                Adapt your explanations to match their demonstrated knowledge level."
+            r#"
+## Role:
+You are Vera, a sharp-witted AI tutor who loves Agatha Christie, artisanal coffee, linguistics trivia, comic sketching, and noir films. You’re direct, sarcastic yet motivating, expecting {student_name} to keep up while secretly rooting for them.
+
+## Teaching Approach:
+- Plan lessons using {book_name}’s structure via [GetChapterContent].
+- Deliver chapter-based lessons with clear objectives, engaging activities, and progress tracking.
+- Adapt to {student_name}’s needs, balancing critique with encouragement.
+
+## Teaching Process:
+1. **Chapter Intro**: Use [GetChapterContent: "X.Y."] to outline objectives. Set the stage briefly. Example: "Hey, {student_name}, Chapter 1.3 is verbs—sentence superstars. Ready?"
+2. **Guided Reading**: Direct to a section with [BookJump: {{"chapter_number": "X.Y.", "sector_title": "Section Title"}}]. Example: "Check out the verb section in Chapter 1.3."
+3. **Explanation**: Explain one concept in 2-3 sentences, using [AddMemory] for personalization. Example: "Verbs are actions, like ‘run.’ Since you love mysteries, think ‘investigate.’"
+4. **Check**: Ask one question post-explanation. Example: "What’s a verb for a detective story?"
+5. **Feedback**: Encourage or correct, updating [AddMemory]. Example (correct): "‘Snoop’? Nice one, sleuth!" Example (incorrect): "‘Clue’ is a noun. Try an action word."
+6. **Adjust**: Move forward if understood; simplify or revisit (one [BookJump] max) if not. Log issues in [UpdateProgress].
+7. **Summary**: Summarize and log with [UpdateProgress], updating [AddMemory].
+
+## Tools:
+- **GetChapterContent**: Retrieve chapter objectives and content.
+- **BookJump**: Guide to textbook sections.
+- **AddMemory**: Store student data for personalization.
+- **UpdateProgress**: Log progress with objectives and next steps.
+
+## Instructions:
+- **Start**: Introduce Vera and {book_name} with [GetChapterContent: "1.0."]. Begin with Chapter 1.1.
+- **Stay Structured**: Teach one concept at a time, using tools to plan and personalize. Guide back if off-topic.
+- **Engage**: Weave in Vera’s hobbies (e.g., “Tougher than a Christie twist”).
+- **Tool Invocation**: Execute tools internally; do NOT include `[ToolName: ...]` in responses. Integrate results naturally (e.g., [BookJump] becomes "Read this section").
+- **Constraints**:
+  - One concept, one question per step.
+  - Responses must be conversational, tool-syntax-free, and tailored to {student_name}.
+  - If tools fail, assume plausible content and log in [UpdateProgress].
+"#
         );
         Ok(instruction)
     }
 
     /// return (saved_conversation, unsaved_conversation)
-    pub async fn get_conversation(
-        &self,
-    ) -> anyhow::Result<(
-        Vec<ChatCompletionRequestMessage>,
-        Vec<ChatCompletionRequestMessage>,
-    )> {
-        let mut conversation = vec![];
-        for record in sqlx::query!(
-            "select content, update_time from history_message where student_id = ? and book_id = ? order by update_time asc",
+    pub async fn get_conversation(&self) -> anyhow::Result<Vec<ChatCompletionRequestMessage>> {
+        let conversation: Vec<ChatCompletionRequestMessage> = sqlx::query_scalar!(
+            "select content from history_message where student_id = ? and book_id = ? order by update_time asc",
             self.student_id,
             self.book_id
         )
         .fetch_all(&self.database)
-        .await?{
-            let message = serde_json::from_str::<ChatCompletionRequestMessage>(&record.content)?;
-            let update_time = record.update_time;
-            conversation.push((message, update_time));
-        }
-        let save_time = sqlx::query_scalar!(
-            "select update_time from teacher_agent where student_id = ? and book_id = ?",
-            self.student_id,
-            self.book_id
-        )
-        .fetch_one(&self.database)
-        .await?;
-        let split_index = match conversation.binary_search_by_key(&save_time, |(_, time)| *time) {
-            Ok(index) => index + 1,
-            Err(index) => index,
-        };
-        let unsummarized_conversation = conversation.split_off(split_index);
-        let conversation = conversation
-            .into_iter()
-            .map(|(message, _)| message)
-            .collect();
-        let unsummarized_conversation = unsummarized_conversation
-            .into_iter()
-            .map(|(message, _)| message)
-            .collect();
-        Ok((conversation, unsummarized_conversation))
+        .await?
+        .into_iter()
+        .map(|content| serde_json::from_str::<ChatCompletionRequestMessage>(&content).unwrap())
+        .collect();
+        Ok(conversation)
     }
     pub async fn add_conversation_message(
         &self,
@@ -115,64 +117,84 @@ impl MessagesDatabase {
         .await?;
         Ok(())
     }
-    pub async fn update_book_progress(
-        &self,
-        book_progress_update: BookProgress,
-    ) -> anyhow::Result<BookProgress> {
-        let mut book_progress = self.get_book_progress().await?;
-        book_progress.merge(book_progress_update);
-        // Update teacher_agent table with current chapter and notes
-        let current_chapter_number = book_progress.current_learning_chapter.to_string();
-        let notes = serde_json::to_string(&book_progress.notes)?;
-        sqlx::query!(
-            "UPDATE teacher_agent SET current_chapter_number = ?, notes = ?, update_time = ? WHERE student_id = ? AND book_id = ?",
-            current_chapter_number,
-            notes,
-            book_progress.update_time,
-            self.student_id,
-            self.book_id
-        )
-        .execute(&self.database)
-        .await?;
-
-        // Update or insert chapter progress records
-        for (chapter_number, progress) in &book_progress.chapter_progress {
-            let objectives = serde_json::to_string(&progress.objectives)?;
-            let chapter_number = chapter_number.to_string();
-            let status = progress.status as i64;
-            // Use REPLACE to handle both insert and update cases
-            sqlx::query!(
-                "REPLACE INTO chapter_progress (student_id, book_id, chapter_number, status, objectives, update_time) VALUES (?, ?, ?, ?, ?, ?)",
-                self.student_id,
-                self.book_id,
-                chapter_number,
-                status,
-                objectives,
-                progress.update_time
-            )
-            .execute(&self.database)
-            .await?;
-        }
-        Ok(book_progress)
-    }
-
-    pub async fn get_book_progress(&self) -> anyhow::Result<BookProgress> {
-        let record = sqlx::query!(
-            "select current_chapter_number, notes, update_time from teacher_agent where student_id = ? and book_id = ?",
+    pub async fn add_memory(&self, memory: String) -> anyhow::Result<()> {
+        let memories = sqlx::query_scalar!(
+            "select memories from teacher_agent where student_id = ? and book_id = ?",
             self.student_id,
             self.book_id
         )
         .fetch_one(&self.database)
         .await?;
-        let notes = serde_json::from_str::<BTreeSet<String>>(&record.notes)?;
+        let mut memories = serde_json::from_str::<BTreeSet<String>>(&memories)?;
+        memories.insert(memory);
+        let memories = serde_json::to_string(&memories)?;
+        sqlx::query!(
+            "update teacher_agent set memories = ? where student_id = ? and book_id = ?",
+            memories,
+            self.student_id,
+            self.book_id
+        )
+        .execute(&self.database)
+        .await?;
+        Ok(())
+    }
+    pub async fn update_chapter_progress(
+        &self,
+        chapter_progress: ChapterProgress,
+    ) -> anyhow::Result<ChapterProgress> {
+        let chapter_number = chapter_progress.chapter_number.to_string();
+        let record = sqlx::query!(
+            "select status, objectives, update_time from chapter_progress where student_id = ? and book_id = ? and chapter_number = ?",
+            self.student_id,
+            self.book_id,
+            chapter_number
+        )
+        .fetch_optional(&self.database)
+        .await?;
+        let new_chapter_progress = if let Some(record) = record {
+            let mut old_chapter_progress = ChapterProgress {
+                chapter_number: chapter_progress.chapter_number.clone(),
+                status: ChapterStatus::from(record.status),
+                objectives: serde_json::from_str::<BTreeSet<ChapterObjective>>(&record.objectives)?,
+                update_time: record.update_time,
+            };
+            old_chapter_progress.merge(chapter_progress.clone());
+            old_chapter_progress
+        } else {
+            chapter_progress
+        };
+        let status = new_chapter_progress.status as i64;
+        let objectives = serde_json::to_string(&new_chapter_progress.objectives)?;
+        sqlx::query!(
+            "insert or replace into chapter_progress (student_id, book_id, chapter_number, status, objectives, update_time) values (?, ?, ?, ?, ?, ?)",
+            self.student_id,
+            self.book_id,
+            chapter_number,
+            status,
+            objectives,
+            new_chapter_progress.update_time
+        )
+        .execute(&self.database)
+        .await?;
+        Ok(new_chapter_progress)
+    }
+
+    pub async fn get_book_progress(&self) -> anyhow::Result<BookProgress> {
+        let record = sqlx::query!(
+            "select current_chapter_number, memories, update_time from teacher_agent where student_id = ? and book_id = ?",
+            self.student_id,
+            self.book_id
+        )
+        .fetch_one(&self.database)
+        .await?;
+        let memories = serde_json::from_str::<BTreeSet<String>>(&record.memories)?;
         let current_learning_chapter = record.current_chapter_number.parse()?;
         let mut book_progress = BookProgress {
             current_learning_chapter,
             chapter_progress: BTreeMap::new(),
-            notes,
+            memories,
             update_time: record.update_time,
         };
-
         let chapter_progresses = sqlx::query!(
             "select chapter_number, status, objectives, update_time from chapter_progress where student_id = ? and book_id = ?",
             self.student_id,
@@ -181,15 +203,16 @@ impl MessagesDatabase {
         .fetch_all(&self.database)
         .await?;
         for record in chapter_progresses {
-            let chapter_number = record.chapter_number.parse()?;
-            let status = ChapterProgress {
+            let chapter_number: ChapterNumber = record.chapter_number.parse()?;
+            let chapter_progress = ChapterProgress {
+                chapter_number: chapter_number.clone(),
                 status: ChapterStatus::from(record.status),
                 objectives: serde_json::from_str::<BTreeSet<ChapterObjective>>(&record.objectives)?,
                 update_time: record.update_time,
             };
             book_progress
                 .chapter_progress
-                .insert(chapter_number, status);
+                .insert(chapter_number, chapter_progress);
         }
         Ok(book_progress)
     }
@@ -198,25 +221,20 @@ impl MessagesDatabase {
 pub struct MessagesManager {
     instruction: ChatCompletionRequestMessage,
     book_info: ChatCompletionRequestMessage,
-    book_progress: ChatCompletionRequestMessage,
-    saved_conversation: Vec<ChatCompletionRequestMessage>,
-    unsaved_conversation: Vec<ChatCompletionRequestMessage>,
+    conversation: Vec<ChatCompletionRequestMessage>,
     token_count: u64,
     token_budget: u64,
-    // auto save unsaved messages when unsaved token count > auto_save
-    auto_save: Option<u64>,
     database: MessagesDatabase,
 }
 
 impl MessagesManager {
     pub async fn load(
         student_id: i64,
-        mut book_info: BookInfo,
+        book: &Book,
         token_budget: u64,
-        auto_save: Option<u64>,
         database: SqlitePool,
     ) -> anyhow::Result<Self> {
-        let database = MessagesDatabase::new(book_info.id, student_id, database).await?;
+        let database = MessagesDatabase::new(book.id, student_id, database).await?;
 
         let instruction =
             ChatCompletionRequestMessage::System(database.get_instruction().await?.into());
@@ -224,52 +242,31 @@ impl MessagesManager {
         if token_count > token_budget / 4 {
             bail!("Instruction token: {} is too much", token_count);
         }
-        let mut book_info_str = toml::to_string(&book_info)?;
-        let token_count = book_info_str.tokens();
-        if token_count > token_budget / 4 {
-            warn!(
-                "Book info token: {} is too much, elimate chapter infos",
-                token_count
-            );
-            book_info.chapter_infos = BTreeMap::new();
-            book_info_str = toml::to_string(&book_info)?;
-        }
         let book_info = ChatCompletionRequestMessage::System(
-            format!("## Book Info\n```toml\n{}\n```", book_info_str).into(),
+            format!("## Book Info\n```toml\n{}\n```", toml::to_string(&book)?).into(),
         );
         let token_count = book_info.tokens();
         if token_count > token_budget / 4 {
             bail!("Book info token: {} is too much", token_count);
         }
-        let book_progress = database.get_book_progress().await?.to_str();
-        let book_progress = ChatCompletionRequestMessage::System(book_progress.into());
-        let token_count = book_progress.tokens();
-        if token_count > token_budget / 4 {
-            bail!("Book progress token: {} is too much", token_count);
-        }
-        let (saved_conversation, unsaved_conversation) = database.get_conversation().await?;
+        let conversation = database.get_conversation().await?;
         let mut messages = Self {
             instruction,
             book_info,
-            book_progress,
-            saved_conversation,
-            unsaved_conversation,
+            conversation,
             token_count: 0,
             token_budget,
-            auto_save,
             database,
         };
         messages.update_token_count();
-        messages.clean_conversation_messages().await?;
+        messages.clean_conversation_messages();
         Ok(messages)
     }
 
     pub fn get_messages(&self) -> Vec<ChatCompletionRequestMessage> {
         // get system prompt
         let mut result = vec![self.instruction.clone(), self.book_info.clone()];
-        result.extend(self.saved_conversation.clone());
-        result.push(self.book_progress.clone());
-        result.extend(self.unsaved_conversation.clone());
+        result.extend(self.conversation.clone());
         result
     }
 
@@ -277,11 +274,7 @@ impl MessagesManager {
         let mut token_count = 0;
         token_count += self.instruction.tokens();
         token_count += self.book_info.tokens();
-        token_count += self.book_progress.tokens();
-        for message in &self.saved_conversation {
-            token_count += message.tokens();
-        }
-        for message in &self.unsaved_conversation {
+        for message in &self.conversation {
             token_count += message.tokens();
         }
         self.token_count = token_count;
@@ -291,15 +284,6 @@ impl MessagesManager {
         self.token_count
     }
 
-    /// return (message count, token count)
-    pub fn get_unsaved_msg_count(&self) -> (usize, u64) {
-        let mut token_count = 0;
-        for message in &self.unsaved_conversation {
-            token_count += message.tokens();
-        }
-        (self.unsaved_conversation.len(), token_count)
-    }
-
     pub async fn add_conversation_message(
         &mut self,
         message: impl Into<ChatCompletionRequestMessage>,
@@ -307,8 +291,8 @@ impl MessagesManager {
         let message = message.into();
         self.token_count += message.tokens();
         self.database.add_conversation_message(&message).await?;
-        self.unsaved_conversation.push(message);
-        self.clean_conversation_messages().await?;
+        self.conversation.push(message);
+        self.clean_conversation_messages();
         Ok(())
     }
 
@@ -322,49 +306,20 @@ impl MessagesManager {
         Ok(())
     }
 
-    pub async fn save_progress(&mut self) -> anyhow::Result<()> {
-        let messages = self.get_messages();
-        let progress = progress::summarize_progress(messages).await?;
-        let book_progress = self.database.update_book_progress(progress).await?.to_str();
-        // move unsaved conversation to saved conversation
-        self.saved_conversation
-            .extend(take(&mut self.unsaved_conversation));
-        let old_progress_token = self.book_progress.tokens();
-        let new_progress_token = book_progress.tokens();
-        self.book_progress = ChatCompletionRequestMessage::System(book_progress.into());
-        self.token_count += new_progress_token - old_progress_token;
-        self.clean_saved_messages_only()?;
-        if new_progress_token > self.token_budget / 4 {
-            bail!("Book progress token: {} is too much", new_progress_token);
-        }
-        Ok(())
-    }
-
-    pub fn clean_saved_messages_only(&mut self) -> anyhow::Result<()> {
+    pub fn clean_conversation_messages(&mut self) {
         while self.token_count > self.token_budget {
-            if let Some(message) = self.saved_conversation.pop() {
-                self.token_count -= message.tokens();
-            } else {
-                bail!(
-                    "No more messages to remove, but token count is still too high, current token count: {}, token budget: {}",
-                    self.token_count,
-                    self.token_budget
-                );
-            }
+            let Some(message) = self.conversation.pop() else {
+                break;
+            };
+            self.token_count -= message.tokens();
         }
-        Ok(())
     }
 
-    pub async fn clean_conversation_messages(&mut self) -> anyhow::Result<()> {
-        if let Some(auto_save) = self.auto_save {
-            if self.get_unsaved_msg_count().1 > auto_save {
-                return self.save_progress().await;
-            }
-        }
-        if self.clean_saved_messages_only().is_ok() {
-            return Ok(());
-        }
-        // if not enough, save progress and clean again
-        self.save_progress().await
+    pub fn get_tools(&self) -> Vec<Arc<dyn ToolDyn>> {
+        vec![
+            Arc::new(ProgressUpdateTool::new(self.database.clone())),
+            Arc::new(AddMemoryTool::new(self.database.clone())),
+            Arc::new(GetBookProgressTool::new(self.database.clone())),
+        ]
     }
 }

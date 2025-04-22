@@ -14,7 +14,7 @@ use tokio::sync::mpsc::Sender;
 
 use crate::ai_utils::{AI_CLIENT, AI_MODEL, ToolCallStreamManager, ToolManager};
 use crate::book::library::Library;
-use crate::book::tools::{BookJumpTool, QueryChapterTool};
+use crate::book::tools::{BookJumpTool, GetChapterTool};
 
 /// The AI Teacher Agent that interacts with students
 pub struct TeacherAgent {
@@ -37,23 +37,16 @@ impl TeacherAgent {
         book_id: i64,
         database: SqlitePool,
     ) -> anyhow::Result<Self> {
-        let record = sqlx::query!("select ai_model, token_budget, auto_save FROM agent_setting")
+        let record = sqlx::query!("select ai_model, token_budget FROM agent_setting")
             .fetch_one(&database)
             .await?;
-        let book_info = library.get_book_info(book_id).await?;
-        let messages = MessagesManager::load(
-            student_id,
-            book_info,
-            record.token_budget as u64,
-            record.auto_save.map(|v| v as u64),
-            database,
-        )
-        .await?;
+        let book = library.get_book(book_id).await?;
+        let messages =
+            MessagesManager::load(student_id, &book, record.token_budget as u64, database).await?;
         let mut tool_manager = ToolManager::default();
-        let query_chapter_tool = QueryChapterTool::new(book_id, library.clone());
-        let book_jump_tool = BookJumpTool::new(book_id, library);
-        tool_manager.add_tool(query_chapter_tool);
-        tool_manager.add_tool(book_jump_tool);
+        tool_manager.add_tool(GetChapterTool::new(book_id, library.clone()));
+        tool_manager.add_tool(BookJumpTool::new(book_id, library.clone()));
+        tool_manager.add_tools(messages.get_tools());
         Ok(Self {
             messages,
             tool_manager,

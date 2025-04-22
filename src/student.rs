@@ -7,10 +7,11 @@ use argon2::{
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use utoipa::ToSchema;
 
 use crate::book::book::BookMeta;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct StudentInfo {
     pub id: i64,
     pub name: String,
@@ -75,6 +76,20 @@ pub async fn delete_student_book(
     id: i64,
     book_id: i64,
 ) -> anyhow::Result<()> {
+    sqlx::query!(
+        "DELETE FROM chapter_progress WHERE student_id = ? AND book_id = ?",
+        id,
+        book_id
+    )
+    .execute(database)
+    .await?;
+    sqlx::query!(
+        "DELETE FROM history_message WHERE student_id = ? AND book_id = ?",
+        id,
+        book_id
+    )
+    .execute(database)
+    .await?;
     sqlx::query!(
         "DELETE FROM teacher_agent WHERE student_id = ? AND book_id = ?",
         id,

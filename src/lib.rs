@@ -1,8 +1,9 @@
+pub mod ai_utils;
+pub mod api;
 pub mod book;
 pub mod config;
 pub mod error;
-pub mod ai_utils;
-pub mod utils;
 pub mod server;
-pub mod teacher;
 pub mod student;
+pub mod teacher;
+pub mod utils;

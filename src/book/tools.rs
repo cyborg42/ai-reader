@@ -10,33 +10,37 @@ use super::{
     library::Library,
 };
 
-pub struct QueryChapterTool {
+pub struct GetChapterTool {
     book_id: i64,
     library: Arc<Library>,
 }
 
-impl QueryChapterTool {
+impl GetChapterTool {
     pub fn new(book_id: i64, library: Arc<Library>) -> Self {
         Self { book_id, library }
     }
 }
 
-impl Tool for QueryChapterTool {
+impl Tool for GetChapterTool {
     type Args = ChapterNumber;
     type Output = Chapter;
     fn name(&self) -> String {
-        "QueryChapter".to_string()
+        "GetChapterContent".to_string()
     }
     fn description(&self) -> Option<String> {
-        Some("Query the content of a chapter from the book".to_string())
+        Some(
+            "Query the content of a chapter from the book. \
+            Before starting to teach a new chapter, use this tool to get the content of this chapter"
+                .to_string(),
+        )
     }
     async fn call(&self, args: Self::Args) -> anyhow::Result<Self::Output> {
-        let chapter = self
-            .library
-            .get_book(self.book_id)
-            .await?
-            .get_chapter_content(&args)?;
-        Ok(chapter)
+        let book = self.library.get_book(self.book_id).await?;
+        let chapter = book
+            .chapters
+            .get(&args)
+            .ok_or(anyhow::anyhow!("Chapter not found: {:?}", args))?;
+        Ok(chapter.clone())
     }
 }
 #[tokio::test]
@@ -87,7 +91,8 @@ impl Tool for BookJumpTool {
     async fn call(&self, args: Self::Args) -> anyhow::Result<Self::Output> {
         let book = self.library.get_book(self.book_id).await?;
         let chapter = book
-            .get_chapter(&args.chapter_number)
+            .chapters
+            .get(&args.chapter_number)
             .ok_or(anyhow::anyhow!(
                 "Chapter not found: {:?}",
                 args.chapter_number

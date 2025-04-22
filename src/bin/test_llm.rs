@@ -9,7 +9,7 @@ use tokio::{
     sync::mpsc::{self, Sender},
 };
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _guard = init_log(None);
     let mut manager = ChatManager::default();
@@ -70,10 +70,12 @@ impl ChatManager {
                 tx.send(content.clone()).await?;
             }
         }
+
         self.conversation
             .push(ChatCompletionRequestMessage::Assistant(
                 response_content.into(),
             ));
+
         Ok(())
     }
 }

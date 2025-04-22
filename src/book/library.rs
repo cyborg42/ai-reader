@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use super::book::{Book, BookInfo, BookMeta};
+use super::book::{Book, BookMeta};
 use anyhow::bail;
 use dashmap::DashMap;
 use dashmap::mapref::one::Ref;
@@ -30,6 +30,9 @@ impl Default for Library {
 impl Library {
     /// create a new book server
     pub async fn new(database: SqlitePool, bookbase: impl AsRef<Path>) -> anyhow::Result<Self> {
+        sqlx::query!("PRAGMA foreign_keys = ON;")
+            .execute(&database)
+            .await?;
         let server = Self {
             books: DashMap::new(),
             bookbase: bookbase.as_ref().to_path_buf(),
@@ -82,12 +85,6 @@ impl Library {
         Ok(())
     }
 
-    pub async fn get_book_info(&self, book_id: i64) -> anyhow::Result<BookInfo> {
-        let book = self.get_book(book_id).await?;
-        let book_path = self.bookbase.join(format!("book_{}", book_id));
-        book.get_book_info(book_path).await
-    }
-
     async fn store_book_to_db(&self, book: &Book) -> anyhow::Result<()> {
         let authors = book.authors.join(",");
         let description = book.description.clone().unwrap_or_default();
@@ -103,8 +100,8 @@ impl Library {
         sqlx::query!("delete from chapter where book_id = ?", book.id)
             .execute(&self.database)
             .await?;
-        for chapter in book.iter() {
-            let number = chapter.number.to_string();
+        for (number, chapter) in book.chapters.iter() {
+            let number = number.to_string();
             sqlx::query!(
                 "insert or replace into chapter (book_id, chapter_number, name) values (?, ?, ?)",
                 book.id,
@@ -157,21 +154,17 @@ impl Library {
 
     pub async fn upload_book_from_mdbook(&self, path: impl AsRef<Path>) -> anyhow::Result<()> {
         let path = path.as_ref();
-        let book = Book::load(path).await?;
+        let book_raw = Book::load(path).await?;
 
         // Check if the book already exists in the database
-        let existing = sqlx::query!("SELECT id FROM book WHERE id = ?", book.id)
+        let existing = sqlx::query!("SELECT id FROM book WHERE id = ?", book_raw.id)
             .fetch_optional(&self.database)
             .await?;
         if existing.is_some() {
-            bail!("Book with ID {} already exists", book.id);
+            bail!("Book with ID {} already exists", book_raw.id);
         }
-
-        // generate book summary
-        book.get_book_info(&path).await?;
-
         // Create the book directory in bookbase
-        let book_dir = self.bookbase.join(format!("book_{}", book.id));
+        let book_dir = self.bookbase.join(format!("book_{}", book_raw.id));
         let _ = tokio::fs::remove_dir_all(&book_dir).await;
         tokio::fs::create_dir_all(&book_dir).await?;
 
@@ -188,11 +181,11 @@ impl Library {
         spawn_blocking(move || fs_extra::dir::copy(path_buf, &book_dir, &copy_options)).await??;
 
         // Insert or replace book in the database
-        self.store_book_to_db(&book).await?;
+        self.store_book_to_db(&book_raw).await?;
         info!(
             "add book {}-{} from {} success",
-            book.id,
-            book.title,
+            book_raw.id,
+            book_raw.title,
             path.display()
         );
         Ok(())
