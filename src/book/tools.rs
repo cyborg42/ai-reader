@@ -47,7 +47,7 @@ impl Tool for GetChapterTool {
 async fn t() {
     let db = sqlx::SqlitePool::connect(":memory:").await.unwrap();
     let library = Arc::new(Library {
-        books: dashmap::DashMap::new(),
+        books: moka::future::Cache::new(1000),
         bookbase: std::path::PathBuf::new(),
         database: db,
     });

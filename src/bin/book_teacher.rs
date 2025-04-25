@@ -89,7 +89,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
     match args.command {
         Commands::Book { command } => match command {
             BookCommand::List => {
-                for book in library.get_book_list().await? {
+                for book in library.get_book_list(false).await? {
                     println!("{:<20} {}", book.id, book.title);
                 }
             }
@@ -125,6 +125,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
         },
         Commands::Login { id, command } => match command {
             LoginCommand::Learn { book_id } => {
+                TeacherAgent::init(id, book_id, database.clone()).await?;
                 let teacher =
                     TeacherAgent::new(Arc::new(library), id, book_id, database.clone()).await?;
                 start_learning(teacher).await?;

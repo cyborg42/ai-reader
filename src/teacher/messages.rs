@@ -26,13 +26,6 @@ pub struct MessagesDatabase {
 
 impl MessagesDatabase {
     pub async fn new(book_id: i64, student_id: i64, database: SqlitePool) -> anyhow::Result<Self> {
-        sqlx::query!(
-            "insert or ignore into teacher_agent (student_id, book_id, current_chapter_number, memories) values (?, ?, '', '[]')",
-            student_id,
-            book_id,
-        )
-        .execute(&database)
-        .await?;
         Ok(Self {
             book_id,
             student_id,

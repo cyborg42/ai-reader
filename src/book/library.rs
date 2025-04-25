@@ -1,17 +1,21 @@
-use std::path::{Path, PathBuf};
+use std::{
+    fs::File,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use super::book::{Book, BookMeta};
 use anyhow::bail;
-use dashmap::DashMap;
-use dashmap::mapref::one::Ref;
 
+use moka::future::Cache;
 use sqlx::SqlitePool;
 use tokio::task::{block_in_place, spawn_blocking};
 use tracing::{error, info};
+use zip::ZipArchive;
 
 #[derive(Debug, Clone)]
 pub struct Library {
-    pub books: DashMap<i64, Book>,
+    pub books: Cache<i64, Arc<Book>>,
     pub bookbase: PathBuf,
     pub database: SqlitePool,
 }
@@ -20,7 +24,7 @@ impl Default for Library {
     fn default() -> Self {
         let database = SqlitePool::connect_lazy("sqlite::memory:").unwrap();
         Self {
-            books: DashMap::new(),
+            books: Cache::new(1000),
             bookbase: PathBuf::new(),
             database,
         }
@@ -34,7 +38,7 @@ impl Library {
             .execute(&database)
             .await?;
         let server = Self {
-            books: DashMap::new(),
+            books: Cache::new(1000),
             bookbase: bookbase.as_ref().to_path_buf(),
             database,
         };
@@ -42,16 +46,16 @@ impl Library {
         Ok(server)
     }
 
-    pub async fn get_book(&self, id: i64) -> anyhow::Result<Ref<i64, Book>> {
-        if let Some(book) = self.books.get(&id) {
+    pub async fn get_book(&self, id: i64) -> anyhow::Result<Arc<Book>> {
+        if let Some(book) = self.books.get(&id).await {
             Ok(book)
         } else {
-            self.load_book(id).await?;
-            Ok(self.books.get(&id).unwrap())
+            let book = self.load_book(id).await?;
+            Ok(book)
         }
     }
 
-    async fn load_book(&self, id: i64) -> anyhow::Result<()> {
+    async fn load_book(&self, id: i64) -> anyhow::Result<Arc<Book>> {
         let _exist = sqlx::query_scalar!("select id from book where id = ?", id)
             .fetch_one(&self.database)
             .await?;
@@ -59,8 +63,9 @@ impl Library {
         if id != book.id {
             bail!("Book ID mismatch: {} != {}", id, book.id);
         }
-        self.books.insert(id, book);
-        Ok(())
+        let book = Arc::new(book);
+        self.books.insert(id, book.clone()).await;
+        Ok(book)
     }
 
     pub async fn load_books(&self) -> anyhow::Result<()> {
@@ -152,19 +157,19 @@ impl Library {
         Ok(())
     }
 
-    pub async fn upload_book_from_mdbook(&self, path: impl AsRef<Path>) -> anyhow::Result<()> {
+    pub async fn upload_book_from_mdbook(&self, path: impl AsRef<Path>) -> anyhow::Result<i64> {
         let path = path.as_ref();
-        let book_raw = Book::load(path).await?;
+        let book = Book::load(path).await?;
 
         // Check if the book already exists in the database
-        let existing = sqlx::query!("SELECT id FROM book WHERE id = ?", book_raw.id)
+        let existing = sqlx::query!("SELECT id FROM book WHERE id = ?", book.id)
             .fetch_optional(&self.database)
             .await?;
         if existing.is_some() {
-            bail!("Book with ID {} already exists", book_raw.id);
+            bail!("Book with ID {} already exists", book.id);
         }
         // Create the book directory in bookbase
-        let book_dir = self.bookbase.join(format!("book_{}", book_raw.id));
+        let book_dir = self.bookbase.join(format!("book_{}", book.id));
         let _ = tokio::fs::remove_dir_all(&book_dir).await;
         tokio::fs::create_dir_all(&book_dir).await?;
 
@@ -181,31 +186,50 @@ impl Library {
         spawn_blocking(move || fs_extra::dir::copy(path_buf, &book_dir, &copy_options)).await??;
 
         // Insert or replace book in the database
-        self.store_book_to_db(&book_raw).await?;
+        self.store_book_to_db(&book).await?;
         info!(
             "add book {}-{} from {} success",
-            book_raw.id,
-            book_raw.title,
+            book.id,
+            book.title,
             path.display()
         );
-        Ok(())
+        Ok(book.id)
     }
 
-    pub async fn upload_book(&self, path: impl AsRef<Path>) -> anyhow::Result<()> {
+    pub async fn upload_book(&self, path: impl AsRef<Path>) -> anyhow::Result<i64> {
         let path = path.as_ref();
         if path.is_dir() {
-            self.upload_book_from_mdbook(path).await?;
-        } else if path.is_file() && path.extension().unwrap_or_default() == "epub" {
-            block_in_place(async || -> anyhow::Result<()> {
-                let output_dir = tempfile::tempdir()?;
-                epub2mdbook::convert_epub_to_mdbook(path, &output_dir, false)?;
-                self.upload_book_from_mdbook(&output_dir).await?;
-                Ok(())
-            })
-            .await?;
+            self.upload_book_from_mdbook(path).await
+        } else if path.is_file() {
+            match path.extension().map(|s| s.to_string_lossy()) {
+                Some(ext) if ext == "epub" => {
+                    block_in_place(async || -> anyhow::Result<i64> {
+                        let output_dir = tempfile::tempdir()?;
+                        epub2mdbook::convert_epub_to_mdbook(path, &output_dir, false)?;
+                        self.upload_book_from_mdbook(&output_dir).await
+                    })
+                    .await
+                }
+                Some(ext) if ext == "zip" => {
+                    block_in_place(async || -> anyhow::Result<i64> {
+                        let output_dir = tempfile::tempdir()?;
+                        let mut zip = ZipArchive::new(File::open(path)?)?;
+                        zip.extract(&output_dir)?;
+                        self.upload_book_from_mdbook(&output_dir).await
+                    })
+                    .await
+                }
+                _ => Err(anyhow::anyhow!("Invalid book path: {}", path.display())),
+            }
         } else {
-            bail!("Invalid book path: {}", path.display());
-        };
+            Err(anyhow::anyhow!("Invalid book path: {}", path.display()))
+        }
+    }
+
+    pub async fn set_book_public(&self, book_id: i64, is_public: bool) -> anyhow::Result<()> {
+        sqlx::query!("update book set is_public = ? where id = ?", is_public, book_id)
+            .execute(&self.database)
+            .await?;
         Ok(())
     }
 
@@ -220,17 +244,21 @@ impl Library {
         Ok(())
     }
 
-    pub async fn get_book_list(&self) -> anyhow::Result<Vec<BookMeta>> {
-        let books = sqlx::query!("select id, title, authors, description from book")
+    pub async fn get_book_list(&self, public_only: bool) -> anyhow::Result<Vec<BookMeta>> {
+        let books = sqlx::query!("select id, title, authors, description, is_public from book")
             .fetch_all(&self.database)
             .await?;
         let mut book_list = Vec::new();
         for book in books {
+            if public_only && !book.is_public {
+                continue;
+            }
             let book_meta = BookMeta {
                 id: book.id,
                 title: book.title,
                 authors: book.authors.split(',').map(|s| s.to_string()).collect(),
                 description: book.description,
+                is_public: book.is_public,
             };
             book_list.push(book_meta);
         }

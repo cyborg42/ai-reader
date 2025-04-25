@@ -1,15 +1,13 @@
-use std::sync::LazyLock;
-
 use argon2::{
     Argon2, PasswordVerifier,
     password_hash::{PasswordHash, PasswordHasher, SaltString, rand_core::OsRng},
 };
-use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
+
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use utoipa::ToSchema;
 
-use crate::book::book::BookMeta;
+use crate::{book::book::BookMeta, teacher::TeacherAgent};
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct StudentInfo {
@@ -55,7 +53,7 @@ pub async fn delete_student(database: &SqlitePool, id: i64) -> anyhow::Result<()
 }
 
 pub async fn get_student_books(database: &SqlitePool, id: i64) -> anyhow::Result<Vec<BookMeta>> {
-    let books = sqlx::query!("SELECT book.id, book.title, book.authors, book.description FROM book inner join teacher_agent on book.id = teacher_agent.book_id WHERE student_id = ?", id)
+    let books = sqlx::query!("SELECT book.id, book.title, book.authors, book.description, book.is_public FROM book inner join teacher_agent on book.id = teacher_agent.book_id WHERE student_id = ?", id)
         .fetch_all(database)
         .await?;
     let mut book_list = Vec::new();
@@ -65,12 +63,23 @@ pub async fn get_student_books(database: &SqlitePool, id: i64) -> anyhow::Result
             title: book.title,
             authors: book.authors.split(',').map(|s| s.to_string()).collect(),
             description: book.description,
+            is_public: book.is_public,
         };
         book_list.push(book_meta);
     }
     Ok(book_list)
 }
 
+pub async fn add_student_books(
+    database: &SqlitePool,
+    id: i64,
+    book_ids: Vec<i64>,
+) -> anyhow::Result<()> {
+    for book_id in book_ids {
+        TeacherAgent::init(id, book_id, database.clone()).await?;
+    }
+    Ok(())
+}
 pub async fn delete_student_book(
     database: &SqlitePool,
     id: i64,
@@ -112,40 +121,13 @@ pub async fn login(database: &SqlitePool, email: String, password: String) -> an
     Ok(student.id)
 }
 
-static JWT_SECRET: LazyLock<Vec<u8>> = LazyLock::new(|| {
-    let _ = dotenvy::dotenv();
-    dotenvy::var("JWT_SECRET").unwrap().as_bytes().to_vec()
-});
-
-#[derive(Debug, Serialize, Deserialize)]
-struct Claims {
-    sub: i64,
-    exp: i64,
-}
-
-pub async fn login_jwt(
-    database: &SqlitePool,
-    email: String,
-    password: String,
-    expired_time: time::Duration,
-) -> anyhow::Result<String> {
-    let id = login(database, email, password).await?;
-    let exp = (time::OffsetDateTime::now_utc() + expired_time).unix_timestamp();
-    let claims = Claims { sub: id, exp };
-    let token = encode(
-        &Header::default(),
-        &claims,
-        &EncodingKey::from_secret(&JWT_SECRET),
-    )?;
-    Ok(token)
-}
-
-pub async fn verify_jwt(token: String) -> anyhow::Result<i64> {
-    let c = decode::<Claims>(
-        &token,
-        &DecodingKey::from_secret(&JWT_SECRET),
-        &Validation::default(),
-    )?
-    .claims;
-    Ok(c.sub)
+pub async fn get_student_info(database: &SqlitePool, id: i64) -> anyhow::Result<StudentInfo> {
+    let student = sqlx::query_as!(
+        StudentInfo,
+        "SELECT id, name, email FROM student WHERE id = ?",
+        id
+    )
+    .fetch_one(database)
+    .await?;
+    Ok(student)
 }

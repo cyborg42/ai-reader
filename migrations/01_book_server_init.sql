@@ -6,7 +6,8 @@ CREATE TABLE book (
     id INTEGER PRIMARY KEY NOT NULL,
     title TEXT NOT NULL,
     authors TEXT NOT NULL,
-    description TEXT
+    description TEXT,
+    is_public BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 CREATE TABLE chapter (
@@ -18,6 +19,13 @@ CREATE TABLE chapter (
 );
 
 CREATE TABLE student (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    name TEXT NOT NULL,
+    email TEXT NOT NULL UNIQUE,
+    password TEXT NOT NULL
+);
+
+CREATE TABLE manager (
     id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     name TEXT NOT NULL,
     email TEXT NOT NULL UNIQUE,
@@ -49,7 +57,10 @@ CREATE TABLE chapter_progress (
     student_id INTEGER NOT NULL,
     book_id INTEGER NOT NULL,
     chapter_number CHAR(20) NOT NULL,
-    status INTEGER CHECK(status BETWEEN 0 AND 2) NOT NULL,
+    status INTEGER CHECK(
+        status BETWEEN 0
+        AND 2
+    ) NOT NULL,
     objectives TEXT NOT NULL,
     update_time DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
     PRIMARY KEY (student_id, book_id, chapter_number),
@@ -61,7 +72,10 @@ CREATE TABLE chapter_progress (
 CREATE TABLE agent_setting (
     id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     ai_model TEXT NOT NULL,
-    token_budget INTEGER NOT NULL,
- );
+    token_budget INTEGER NOT NULL
+);
 
- INSERT INTO agent_setting (ai_model, token_budget, auto_save) VALUES ('grok-2-latest', 100000, 10000);
+INSERT INTO
+    agent_setting (ai_model, token_budget)
+VALUES
+    ('grok-2-latest', 100000);

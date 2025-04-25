@@ -22,12 +22,10 @@ use serde_json::json;
 use tracing::error;
 
 pub static AI_MODEL: LazyLock<String> = LazyLock::new(|| {
-    let _ = dotenvy::dotenv();
     dotenvy::var("AI_MODEL").unwrap()
 });
 
 pub static AI_CLIENT: LazyLock<Client<OpenAIConfig>> = LazyLock::new(|| {
-    let _ = dotenvy::dotenv();
     let api_key = dotenvy::var("OPENAI_API_KEY").unwrap();
     let base_url = dotenvy::var("OPENAI_BASE_URL").unwrap();
     let config = OpenAIConfig::default()
@@ -181,14 +179,14 @@ impl ToolManager {
         &self,
         calls: impl IntoIterator<Item = ChatCompletionMessageToolCall>,
     ) -> Vec<ChatCompletionRequestToolMessage> {
-        let mut handles = Vec::new();
+        let mut handler = Vec::new();
 
         let mut outputs = Vec::new();
         // Spawn a task for each tool call
         for call in calls {
             if let Some(tool) = self.tools.get(&call.function.name).cloned() {
                 let handle = tokio::spawn(async move { tool.call(call.function.arguments).await });
-                handles.push((call.id, handle));
+                handler.push((call.id, handle));
             } else {
                 outputs.push(ChatCompletionRequestToolMessage {
                     content: "Tool not found".into(),
@@ -197,16 +195,16 @@ impl ToolManager {
             }
         }
         // Collect results from all spawned tasks
-        for (id, handle) in handles {
+        for (id, handle) in handler {
             let output = match handle.await {
                 Ok(Ok(output)) => output,
                 Ok(Err(e)) => {
                     error!("Tool call {} failed: {}", id, e);
-                    e.to_string()
+                    format!("Tool call failed: {}", e)
                 }
                 Err(e) => {
-                    error!("Tool call {} Join error: {}", id, e);
-                    continue;
+                    error!("Tool call {} failed: {}", id, e);
+                    format!("Tool call failed: {}", e)
                 }
             };
             outputs.push(ChatCompletionRequestToolMessage {

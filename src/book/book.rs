@@ -54,6 +54,7 @@ pub struct BookMeta {
     pub title: String,
     pub authors: Vec<String>,
     pub description: Option<String>,
+    pub is_public: bool,
 }
 
 impl BookRaw {

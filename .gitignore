@@ -5,3 +5,5 @@
 /bookbase
 /.VSCodeCounter
 /.env
+*.pem
+/config

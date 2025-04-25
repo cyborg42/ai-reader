@@ -1,6 +1,8 @@
 use std::{path::PathBuf, sync::LazyLock};
 
-use time::UtcOffset;
+use time::{UtcOffset, format_description::well_known};
+use tracing::level_filters::LevelFilter;
+use tracing_subscriber::{EnvFilter, fmt::time::OffsetTime};
 
 pub static LOCAL_OFFSET: LazyLock<UtcOffset> =
     LazyLock::new(|| match time::UtcOffset::current_local_offset() {
@@ -38,11 +40,16 @@ pub fn sleep_until_next_day(until: time::Time) {
 
 /// initialize the log
 pub fn init_log(log_dir: Option<PathBuf>) -> tracing_appender::non_blocking::WorkerGuard {
+    let env_filter = EnvFilter::builder()
+        .with_default_directive(LevelFilter::INFO.into())
+        .from_env_lossy();
     let mut subscriber_builder = tracing_subscriber::fmt::Subscriber::builder()
+        .with_env_filter(env_filter)
         .with_ansi(false)
         .with_file(true)
         .with_line_number(true)
-        .with_thread_names(true);
+        .with_thread_names(true)
+        .with_timer(OffsetTime::new(*LOCAL_OFFSET, well_known::Rfc3339));
     let (non_blocking, guard) = if let Some(log_dir) = log_dir {
         // output to file，daily rotate, non-blocking
         if !log_dir.is_dir() {
@@ -52,8 +59,8 @@ pub fn init_log(log_dir: Option<PathBuf>) -> tracing_appender::non_blocking::Wor
         tracing_appender::non_blocking(file_appender)
     } else {
         subscriber_builder = subscriber_builder.with_ansi(true);
-        // output to stdout
-        tracing_appender::non_blocking(std::io::stdout())
+        // output to stderr
+        tracing_appender::non_blocking(std::io::stderr())
     };
     let subscriber = subscriber_builder.with_writer(non_blocking).finish();
     tracing::subscriber::set_global_default(subscriber).expect("init log failed");

@@ -2,6 +2,7 @@ pub mod messages;
 
 use std::sync::Arc;
 
+use actix_web_lab::sse::{Data, Event};
 use async_openai::types::{
     ChatCompletionMessageToolCall, ChatCompletionRequestAssistantMessageArgs,
     ChatCompletionRequestToolMessage, ChatCompletionRequestUserMessage,
@@ -9,6 +10,7 @@ use async_openai::types::{
 };
 use futures::StreamExt;
 use messages::MessagesManager;
+use serde::Serialize;
 use sqlx::SqlitePool;
 use tokio::sync::mpsc::Sender;
 
@@ -22,7 +24,7 @@ pub struct TeacherAgent {
     tool_manager: ToolManager,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum ResponseEvent {
     Content(String),
     Refusal(String),
@@ -31,6 +33,16 @@ pub enum ResponseEvent {
 }
 
 impl TeacherAgent {
+    pub async fn init(student_id: i64, book_id: i64, database: SqlitePool) -> anyhow::Result<()> {
+        sqlx::query!(
+            "insert or ignore into teacher_agent (student_id, book_id, current_chapter_number, memories) values (?, ?, '', '[]')",
+            student_id,
+            book_id,
+        )
+        .execute(&database)
+        .await?;
+        Ok(())
+    }
     pub async fn new(
         library: Arc<Library>,
         student_id: i64,
@@ -52,11 +64,14 @@ impl TeacherAgent {
             tool_manager,
         })
     }
-    pub async fn input(
+    pub async fn input<E>(
         &mut self,
         msg: ChatCompletionRequestUserMessage,
-        tx: Sender<ResponseEvent>,
-    ) -> anyhow::Result<()> {
+        tx: Sender<E>,
+    ) -> anyhow::Result<()>
+    where
+        E: From<ResponseEvent> + Send + Sync + 'static,
+    {
         self.messages.add_conversation_message(msg).await?;
         let tools = self.tool_manager.get_tools();
         loop {
@@ -77,7 +92,8 @@ impl TeacherAgent {
                 };
                 if let Some(content) = choice.delta.content.as_ref() {
                     whole_content.push_str(content);
-                    tx.send(ResponseEvent::Content(content.clone())).await?;
+                    tx.send(ResponseEvent::Content(content.to_string()).into())
+                        .await?;
                 }
                 if let Some(refusal) = choice.delta.refusal.as_ref() {
                     whole_refusal.push_str(refusal);
@@ -91,7 +107,7 @@ impl TeacherAgent {
                 message_builder.content(whole_content);
             }
             if !whole_refusal.is_empty() {
-                tx.send(ResponseEvent::Refusal(whole_refusal.clone()))
+                tx.send(ResponseEvent::Refusal(whole_refusal.clone()).into())
                     .await?;
                 message_builder.refusal(whole_refusal);
             }
@@ -107,11 +123,12 @@ impl TeacherAgent {
                 break;
             }
             for tool_call in &tool_calls {
-                tx.send(ResponseEvent::ToolCall(tool_call.clone())).await?;
+                tx.send(ResponseEvent::ToolCall(tool_call.clone()).into())
+                    .await?;
             }
             let tool_results = self.tool_manager.call(tool_calls).await;
             for tool_result in &tool_results {
-                tx.send(ResponseEvent::ToolResult(tool_result.clone()))
+                tx.send(ResponseEvent::ToolResult(tool_result.clone()).into())
                     .await?;
             }
             self.messages
@@ -119,5 +136,11 @@ impl TeacherAgent {
                 .await?;
         }
         Ok(())
+    }
+}
+
+impl From<ResponseEvent> for Event {
+    fn from(event: ResponseEvent) -> Self {
+        Event::Data(Data::new_json(event).unwrap_or_else(|_| Data::new("")))
     }
 }
