@@ -269,7 +269,7 @@ impl PartialOrd for ChapterNumber {
 impl Ord for ChapterNumber {
     fn cmp(&self, other: &Self) -> Ordering {
         // if self.0[0] == -1, it is a suffix chapter
-        match (self.0.get(0), other.0.get(0)) {
+        match (self.0.first(), other.0.first()) {
             (Some(n), Some(m)) => {
                 if (*n == -1) == (*m == -1) {
                     self.0.cmp(&other.0)

@@ -16,7 +16,7 @@ use sqlx::SqlitePool;
 use tokio::sync::{Mutex, mpsc::channel};
 use utoipa::ToSchema;
 
-use crate::{book::library::Library, student, teacher::TeacherAgent};
+use crate::{books::library::Library, student, teacher::TeacherAgent};
 
 use super::upload_books;
 
@@ -157,13 +157,15 @@ pub struct ChatRequest {
     message: String,
 }
 
+type TeacherAgentCache = Cache<(i64, i64), Arc<Mutex<TeacherAgent>>>;
+
 #[utoipa::path(context_path = "/api/user")]
 #[post("/chat")]
 pub async fn chat(
     session: Session,
     db: web::Data<SqlitePool>,
     library: web::Data<Library>,
-    cache: web::Data<Cache<(i64, i64), Arc<Mutex<TeacherAgent>>>>,
+    cache: web::Data<TeacherAgentCache>,
     req: web::Json<ChatRequest>,
 ) -> impl Responder {
     let Ok(Some(student_id)) = session.get::<i64>("student_id") else {
@@ -178,9 +180,7 @@ pub async fn chat(
                     let teacher = Arc::new(Mutex::new(teacher));
                     Ok(teacher)
                 }
-                Err(e) => {
-                    return Err(e.to_string());
-                }
+                Err(e) => Err(e.to_string()),
             }
         })
         .await
@@ -204,7 +204,7 @@ pub async fn chat(
 }
 
 pub fn get_user_scope(
-    cache: web::Data<Cache<(i64, i64), Arc<Mutex<TeacherAgent>>>>,
+    cache: web::Data<TeacherAgentCache>,
 ) -> Scope<
     impl ServiceFactory<
         ServiceRequest,

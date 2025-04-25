@@ -1,6 +1,6 @@
 pub mod ai_utils;
 pub mod api;
-pub mod book;
+pub mod books;
 pub mod error;
 pub mod student;
 pub mod teacher;

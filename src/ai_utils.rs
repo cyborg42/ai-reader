@@ -21,9 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::error;
 
-pub static AI_MODEL: LazyLock<String> = LazyLock::new(|| {
-    dotenvy::var("AI_MODEL").unwrap()
-});
+pub static AI_MODEL: LazyLock<String> = LazyLock::new(|| dotenvy::var("AI_MODEL").unwrap());
 
 pub static AI_CLIENT: LazyLock<Client<OpenAIConfig>> = LazyLock::new(|| {
     let api_key = dotenvy::var("OPENAI_API_KEY").unwrap();
@@ -146,7 +144,7 @@ impl<T: Tool> ToolDyn for T {
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send + '_>> {
         let future = async move {
             match serde_json::from_str::<T::Args>(&args)
-                .or_else(|e| serde_json::from_str::<T::Args>(&"null").map_err(|_| e))
+                .or_else(|e| serde_json::from_str::<T::Args>("null").map_err(|_| e))
             {
                 Ok(args) => T::call(self, args).await.and_then(|output| {
                     serde_json::to_string(&output)
@@ -274,7 +272,7 @@ pub async fn extract_key_points(content: &str) -> anyhow::Result<Vec<String>> {
         .create(request)
         .await?
         .choices
-        .get(0)
+        .first()
         .ok_or(anyhow::anyhow!("No response from OpenAI"))?
         .message
         .tool_calls
@@ -360,7 +358,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        book::chapter::{ChapterNumber, ChapterRaw},
+        books::chapter::{ChapterNumber, ChapterRaw},
         utils::init_log,
     };
 

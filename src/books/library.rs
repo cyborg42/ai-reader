@@ -227,9 +227,13 @@ impl Library {
     }
 
     pub async fn set_book_public(&self, book_id: i64, is_public: bool) -> anyhow::Result<()> {
-        sqlx::query!("update book set is_public = ? where id = ?", is_public, book_id)
-            .execute(&self.database)
-            .await?;
+        sqlx::query!(
+            "update book set is_public = ? where id = ?",
+            is_public,
+            book_id
+        )
+        .execute(&self.database)
+        .await?;
         Ok(())
     }
 

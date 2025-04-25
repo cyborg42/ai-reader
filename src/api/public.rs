@@ -1,6 +1,10 @@
-use actix_web::{dev::{ServiceFactory, ServiceRequest, ServiceResponse}, get, web, HttpResponse, Responder, Scope};
+use actix_web::{
+    HttpResponse, Responder, Scope,
+    dev::{ServiceFactory, ServiceRequest, ServiceResponse},
+    get, web,
+};
 
-use crate::book::library::Library;
+use crate::books::library::Library;
 
 #[utoipa::path(context_path = "/api/public")]
 #[get("/public_books")]

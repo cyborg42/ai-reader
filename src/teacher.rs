@@ -15,8 +15,8 @@ use sqlx::SqlitePool;
 use tokio::sync::mpsc::Sender;
 
 use crate::ai_utils::{AI_CLIENT, AI_MODEL, ToolCallStreamManager, ToolManager};
-use crate::book::library::Library;
-use crate::book::tools::{BookJumpTool, GetChapterTool};
+use crate::books::library::Library;
+use crate::books::tools::{BookJumpTool, GetChapterTool};
 
 /// The AI Teacher Agent that interacts with students
 pub struct TeacherAgent {

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use utoipa::ToSchema;
 
-use crate::{book::book::BookMeta, teacher::TeacherAgent};
+use crate::{books::book::BookMeta, teacher::TeacherAgent};
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct StudentInfo {

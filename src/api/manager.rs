@@ -10,7 +10,7 @@ use serde::Deserialize;
 use sqlx::SqlitePool;
 use utoipa::ToSchema;
 
-use crate::{book::library::Library, student};
+use crate::{books::library::Library, student};
 
 use super::upload_books;
 

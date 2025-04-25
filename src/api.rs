@@ -9,7 +9,7 @@ use anyhow::bail;
 use futures::TryStreamExt;
 use tokio::{fs::File, io::AsyncWriteExt};
 
-use crate::book::library::Library;
+use crate::books::library::Library;
 
 pub async fn upload_books(
     mut payload: Multipart,

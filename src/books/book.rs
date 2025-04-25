@@ -100,16 +100,16 @@ impl BookRaw {
         while let Some(mut ch) = iter.next() {
             if !ch.number.is_empty() {
                 is_prefix = false;
+                continue;
+            }
+            if is_prefix {
+                // prefix chapter, number is 0.1, 0.2, 0.3, ...
+                ch.number = ChapterNumber::from_iter(vec![0, prefix_idx]);
+                prefix_idx += 1;
             } else {
-                if is_prefix {
-                    // prefix chapter, number is 0.1, 0.2, 0.3, ...
-                    ch.number = ChapterNumber::from_iter(vec![0, prefix_idx]);
-                    prefix_idx += 1;
-                } else {
-                    // suffix chapter, number is -1.1, -1.2, -1.3, ...
-                    ch.number = ChapterNumber::from_iter(vec![-1, suffix_idx]);
-                    suffix_idx += 1;
-                }
+                // suffix chapter, number is -1.1, -1.2, -1.3, ...
+                ch.number = ChapterNumber::from_iter(vec![-1, suffix_idx]);
+                suffix_idx += 1;
             }
         }
 

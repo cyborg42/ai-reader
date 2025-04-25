@@ -14,7 +14,7 @@ use tools::{AddMemoryTool, GetBookProgressTool, ProgressUpdateTool};
 
 use crate::{
     ai_utils::{Tokens, ToolDyn},
-    book::{book::Book, chapter::ChapterNumber},
+    books::{book::Book, chapter::ChapterNumber},
 };
 
 #[derive(Debug, Clone)]

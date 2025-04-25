@@ -8,7 +8,7 @@ use actix_session::{
 use actix_web::{App, HttpServer, cookie::Key, web};
 use book_server::{
     api::{manager::get_manager_scope, public::get_public_scope, user::get_user_scope},
-    book::library::Library,
+    books::library::Library,
     utils::init_log,
 };
 use clap::Parser;

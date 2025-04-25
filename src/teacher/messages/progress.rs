@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::book::chapter::ChapterNumber;
+use crate::books::chapter::ChapterNumber;
 use crate::utils::now_local;
 
 use schemars::JsonSchema;
@@ -28,7 +28,7 @@ impl From<i64> for ChapterStatus {
 
 /// Represents a specific learning objective within a chapter
 /// Contains the objective description and whether it has been completed
-#[derive(Debug, Clone, Deserialize, Serialize, Hash, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct ChapterObjective {
     /// The text description of the learning objective
     pub description: String,
@@ -59,6 +59,12 @@ impl PartialEq for ChapterObjective {
     }
 }
 impl Eq for ChapterObjective {}
+
+impl std::hash::Hash for ChapterObjective {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.description.hash(state);
+    }
+}
 
 /// Tracks a student's progress through a specific chapter
 #[derive(Debug, Clone, Deserialize, Serialize, Hash, JsonSchema)]

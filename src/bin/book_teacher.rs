@@ -2,7 +2,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use async_openai::types::ChatCompletionRequestUserMessage;
 use book_server::{
-    book::library::Library,
+    books::library::Library,
     student::{
         create_student, delete_student, delete_student_book, get_student_books, get_student_list,
     },
@@ -189,7 +189,7 @@ async fn start_learning(mut teacher: TeacherAgent) -> anyhow::Result<()> {
                                     stdout.flush().await?;
                                     scene = CurrentScene::Refusal;
                                 }
-                                stdout.write_all(format!("{}", refusal).as_bytes()).await?;
+                                stdout.write_all(refusal.to_string().as_bytes()).await?;
                                 stdout.flush().await?;
                             }
                             ResponseEvent::ToolCall(call) => {
