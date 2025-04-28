@@ -1,16 +1,19 @@
-use actix_multipart::Multipart;
-use actix_session::Session;
-use actix_web::{
-    HttpResponse, Responder, Scope,
-    dev::{ServiceFactory, ServiceRequest, ServiceResponse},
-    get, post, web,
-};
+use crate::books::book::BookMeta;
+use crate::books::library::Library;
+use crate::student;
+use crate::student::StudentInfo;
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
+use axum::{
+    Router,
+    extract::{Json, Multipart, Query, State},
+    response::IntoResponse,
+    routing::{get, post},
+};
 use serde::Deserialize;
 use sqlx::SqlitePool;
+use std::sync::Arc;
+use tower_sessions::Session;
 use utoipa::ToSchema;
-
-use crate::{books::library::Library, student};
 
 use super::upload_books;
 
@@ -36,121 +39,181 @@ async fn manager_login(
     Ok(manager.id)
 }
 
-#[utoipa::path(context_path = "/api/manager")]
-#[post("/login")]
+#[utoipa::path(
+    context_path = "/api/manager",
+    path = "/login",
+    method(post),
+    request_body = LoginRequest,
+    responses(
+        (status = 200, description = "Login successful"),
+        (status = 400, description = "Invalid credentials")
+    )
+)]
+#[axum::debug_handler]
 pub async fn login(
+    State(library): State<Arc<Library>>,
     session: Session,
-    req: web::Json<LoginRequest>,
-    db: web::Data<SqlitePool>,
-) -> impl Responder {
-    let LoginRequest { email, password } = req.into_inner();
-    match manager_login(db.as_ref(), email, password).await {
+    Json(req): Json<LoginRequest>,
+) -> impl IntoResponse {
+    let db = &library.database;
+    let LoginRequest { email, password } = req;
+    match manager_login(db, email, password).await {
         Ok(id) => {
-            session.insert("manager_id", id).unwrap();
-            HttpResponse::Ok().body("Login successful")
+            session.insert("manager_id", id).await.unwrap();
+            "Login successful".into_response()
         }
-        Err(e) => HttpResponse::BadRequest().body(e.to_string()),
+        Err(e) => (axum::http::StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     }
 }
 
-#[utoipa::path(context_path = "/api/manager")]
-#[post("/logout")]
-pub async fn logout(session: Session) -> impl Responder {
-    session.purge();
-    HttpResponse::Ok().body("Logout successful")
+#[utoipa::path(
+    context_path = "/api/manager",
+    path = "/logout",
+    method(post),
+    responses(
+        (status = 200, description = "Logout successful")
+    )
+)]
+pub async fn logout(session: Session) -> impl IntoResponse {
+    let _ = session.delete().await;
+    "Logout successful".into_response()
 }
 
-#[utoipa::path(context_path = "/api/manager")]
-#[get("/list_books")]
-pub async fn list_books(session: Session, library: web::Data<Library>) -> impl Responder {
-    let Ok(Some(_)) = session.get::<i64>("manager_id") else {
-        return HttpResponse::Unauthorized().body(());
+#[utoipa::path(
+    context_path = "/api/manager",
+    path = "/list_books",
+    method(get),
+    responses(
+        (status = 200, description = "List of books", body = Vec<BookMeta>),
+        (status = 401, description = "Unauthorized")
+    )
+)]
+pub async fn list_books(
+    State(library): State<Arc<Library>>,
+    session: Session,
+) -> impl IntoResponse {
+    let Ok(Some(_)) = session.get::<i64>("manager_id").await else {
+        return (axum::http::StatusCode::UNAUTHORIZED, ()).into_response();
     };
     match library.get_book_list(false).await {
-        Ok(books) => HttpResponse::Ok().json(books),
-        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+        Ok(books) => Json(books).into_response(),
+        Err(e) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 
-#[utoipa::path(context_path = "/api/manager")]
-#[post("/upload_public_book")]
+#[utoipa::path(
+    context_path = "/api/manager",
+    path = "/upload_public_book",
+    method(post),
+    responses(
+        (status = 200, description = "Book uploaded successfully", body = Vec<i64>),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error")
+    )
+)]
 pub async fn upload_public_book(
+    State(library): State<Arc<Library>>,
     session: Session,
-    payload: Multipart,
-    library: web::Data<Library>,
-) -> impl Responder {
-    let Ok(Some(_)) = session.get::<i64>("manager_id") else {
-        return HttpResponse::Unauthorized().body(());
+    multipart: Multipart,
+) -> impl IntoResponse {
+    let Ok(Some(_)) = session.get::<i64>("manager_id").await else {
+        return (axum::http::StatusCode::UNAUTHORIZED, ()).into_response();
     };
-    match upload_books(payload, library.into_inner()).await {
-        Ok(book_ids) => HttpResponse::Ok().json(book_ids),
-        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+    match upload_books(multipart, library).await {
+        Ok(book_ids) => Json(book_ids).into_response(),
+        Err(e) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 
-#[utoipa::path(context_path = "/api/manager")]
-#[post("/remove_book")]
+#[utoipa::path(
+    context_path = "/api/manager",
+    path = "/remove_book",
+    method(post),
+    params(
+        ("book_id" = i64, Query, description = "ID of the book to remove")
+    ),
+    responses(
+        (status = 200, description = "Book removed successfully"),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error")
+    )
+)]
 pub async fn remove_book(
+    State(library): State<Arc<Library>>,
     session: Session,
-    book_id: web::Query<i64>,
-    library: web::Data<Library>,
-) -> impl Responder {
-    let Ok(Some(_)) = session.get::<i64>("manager_id") else {
-        return HttpResponse::Unauthorized().body(());
+    Query(book_id): Query<i64>,
+) -> impl IntoResponse {
+    let Ok(Some(_)) = session.get::<i64>("manager_id").await else {
+        return (axum::http::StatusCode::UNAUTHORIZED, ()).into_response();
     };
-    match library.delete_book(book_id.into_inner()).await {
-        Ok(_) => HttpResponse::Ok().body("Book removed successfully"),
-        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+    match library.delete_book(book_id).await {
+        Ok(_) => "Book removed successfully".into_response(),
+        Err(e) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 
-#[utoipa::path(context_path = "/api/manager")]
-#[post("/set_book_public")]
+#[utoipa::path(
+    context_path = "/api/manager",
+    path = "/set_book_public",
+    method(post),
+    params(
+        ("book_id" = i64, Query, description = "ID of the book to set public"),
+        ("is_public" = bool, Query, description = "Whether to set the book as public")
+    ),
+    responses(
+        (status = 200, description = "Book visibility updated successfully"),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error")
+    )
+)]
 pub async fn set_book_public(
+    State(library): State<Arc<Library>>,
     session: Session,
-    book_id: web::Query<i64>,
-    is_public: web::Query<bool>,
-    library: web::Data<Library>,
-) -> impl Responder {
-    let Ok(Some(_)) = session.get::<i64>("manager_id") else {
-        return HttpResponse::Unauthorized().body(());
+    Query((book_id, is_public)): Query<(i64, bool)>,
+) -> impl IntoResponse {
+    let Ok(Some(_)) = session.get::<i64>("manager_id").await else {
+        return (axum::http::StatusCode::UNAUTHORIZED, ()).into_response();
     };
-    match library
-        .set_book_public(book_id.into_inner(), is_public.into_inner())
-        .await
-    {
-        Ok(_) => HttpResponse::Ok().body("Book public set successfully"),
-        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+    match library.set_book_public(book_id, is_public).await {
+        Ok(_) => "Book visibility updated successfully".into_response(),
+        Err(e) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 
-#[utoipa::path(context_path = "/api/manager")]
-#[get("/list_students")]
-pub async fn list_students(session: Session, db: web::Data<SqlitePool>) -> impl Responder {
-    let Ok(Some(_)) = session.get::<i64>("manager_id") else {
-        return HttpResponse::Unauthorized().body(());
+#[utoipa::path(
+    context_path = "/api/manager",
+    path = "/list_students",
+    method(get),
+    responses(
+        (status = 200, description = "List of students", body = Vec<StudentInfo>),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error")
+    )
+)]
+pub async fn list_students(
+    State(library): State<Arc<Library>>,
+    session: Session,
+) -> impl IntoResponse {
+    let db = &library.database;
+    let Ok(Some(_)) = session.get::<i64>("manager_id").await else {
+        return (axum::http::StatusCode::UNAUTHORIZED, ()).into_response();
     };
-    match student::get_student_list(db.as_ref()).await {
-        Ok(students) => HttpResponse::Ok().json(students),
-        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+    match student::get_student_list(db).await {
+        Ok(students) => Json(students).into_response(),
+        Err(e) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 
-pub fn get_manager_scope() -> Scope<
-    impl ServiceFactory<
-        ServiceRequest,
-        Config = (),
-        Response = ServiceResponse,
-        Error = actix_web::Error,
-        InitError = (),
-    >,
-> {
-    web::scope("/manager")
-        .service(login)
-        .service(logout)
-        .service(list_books)
-        .service(upload_public_book)
-        .service(remove_book)
-        .service(set_book_public)
-        .service(list_students)
+pub fn get_manager_scope() -> Router<Arc<Library>> {
+    Router::new().nest(
+        "/manager",
+        Router::new()
+            .route("/login", post(login))
+            .route("/logout", post(logout))
+            .route("/list_books", get(list_books))
+            .route("/upload_public_book", post(upload_public_book))
+            .route("/remove_book", post(remove_book))
+            .route("/set_book_public", post(set_book_public))
+            .route("/list_students", get(list_students)),
+    )
 }

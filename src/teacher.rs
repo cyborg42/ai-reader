@@ -1,13 +1,14 @@
 pub mod messages;
 
+use std::convert::Infallible;
 use std::sync::Arc;
 
-use actix_web_lab::sse::{Data, Event};
 use async_openai::types::{
     ChatCompletionMessageToolCall, ChatCompletionRequestAssistantMessageArgs,
     ChatCompletionRequestToolMessage, ChatCompletionRequestUserMessage,
     CreateChatCompletionRequestArgs,
 };
+use axum::response::sse::Event;
 use futures::StreamExt;
 use messages::MessagesManager;
 use serde::Serialize;
@@ -139,8 +140,8 @@ impl TeacherAgent {
     }
 }
 
-impl From<ResponseEvent> for Event {
+impl From<ResponseEvent> for Result<Event, Infallible> {
     fn from(event: ResponseEvent) -> Self {
-        Event::Data(Data::new_json(event).unwrap_or_else(|_| Data::new("")))
+        Ok(Event::default().json_data(event).unwrap())
     }
 }
