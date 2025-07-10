@@ -1,7 +1,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use async_openai::types::ChatCompletionRequestUserMessage;
-use book_server::{
+use ai_reader::{
     books::library::Library,
     student::{
         create_student, delete_student, delete_student_book, get_student_books, get_student_list,
@@ -127,7 +127,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
             LoginCommand::Learn { book_id } => {
                 TeacherAgent::init(id, book_id, database.clone()).await?;
                 let teacher =
-                    TeacherAgent::new(Arc::new(library), id, book_id, database.clone()).await?;
+                    TeacherAgent::new(Arc::new(library), id, book_id).await?;
                 start_learning(teacher).await?;
             }
             LoginCommand::ListBooks => {

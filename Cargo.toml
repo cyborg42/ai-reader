@@ -1,5 +1,5 @@
 [package]
-name = "book-server"
+name = "ai-reader"
 version = "0.1.0"
 edition = "2024"
 
@@ -27,7 +27,7 @@ dotenvy = "0.15.0"
 walkdir = "2.5.0"
 tree-iter = "0.6.0"
 schemars = "0.8.22"
-async-openai = "0.28"
+async-openai = { git = "https://github.com/cyborg42/async-openai.git" }
 futures = "0.3.31"
 parking_lot = "0.12.3"
 async-scoped = { version = "0.9.0", features = ["use-tokio"] }
@@ -38,7 +38,12 @@ utoipa = { version = "5.3.1", features = ["axum_extras", "time"] }
 utoipa-swagger-ui = { version = "9.0.1", features = ["axum"] }
 axum = { version = "0.8", features = ["macros", "multipart", "ws", "http2"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace", "cors", "compression-br", "timeout"] }
+tower-http = { version = "0.6", features = [
+    "trace",
+    "cors",
+    "compression-br",
+    "timeout",
+] }
 redis = { version = "0.30", features = ["tokio-comp"] }
 tower-cookies = "0.11"
 axum-extra = { version = "0.10", features = ["typed-header"] }
@@ -51,6 +56,7 @@ tokio-rustls = "0.26"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 tower-sessions = "0.14.0"
 tower-sessions-moka-store = "*"
-tower-sessions-sqlx-store = {version = "0.15.0", features = ["sqlite"]}
+tower-sessions-sqlx-store = { version = "0.15.0", features = ["sqlite"] }
 tokio-stream = "0.1.17"
 futures-util = "0.3.31"
+rand = "0.9.1"

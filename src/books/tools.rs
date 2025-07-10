@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
+use async_openai::tools::Tool;
 use schemars::JsonSchema;
 use serde::Deserialize;
-
-use crate::ai_utils::Tool;
 
 use super::{
     chapter::{Chapter, ChapterNumber},
@@ -24,10 +23,11 @@ impl GetChapterTool {
 impl Tool for GetChapterTool {
     type Args = ChapterNumber;
     type Output = Chapter;
-    fn name(&self) -> String {
+    type Error = anyhow::Error;
+    fn name() -> String {
         "GetChapterContent".to_string()
     }
-    fn description(&self) -> Option<String> {
+    fn description() -> Option<String> {
         Some(
             "Query the content of a chapter from the book. \
             Before starting to teach a new chapter, use this tool to get the content of this chapter"
@@ -45,14 +45,7 @@ impl Tool for GetChapterTool {
 }
 #[tokio::test]
 async fn t() {
-    let db = sqlx::SqlitePool::connect(":memory:").await.unwrap();
-    let library = Arc::new(Library {
-        books: moka::future::Cache::new(1000),
-        bookbase: std::path::PathBuf::new(),
-        database: db,
-    });
-    let tool = BookJumpTool::new(1, library);
-    println!("{:#?}", tool.definition());
+    println!("{:#?}", BookJumpTool::definition());
 }
 /// Specifies a location in the book by chapter number and optional section title
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -77,10 +70,11 @@ impl BookJumpTool {
 impl Tool for BookJumpTool {
     type Args = BookLocation;
     type Output = String;
-    fn name(&self) -> String {
+    type Error = anyhow::Error;
+    fn name() -> String {
         "BookJump".to_string()
     }
-    fn description(&self) -> Option<String> {
+    fn description() -> Option<String> {
         Some(
             "Use this tool to navigate to a specific chapter or section in the book \
              when you need the student to read particular content. It helps direct the \

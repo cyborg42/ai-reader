@@ -3,10 +3,11 @@ pub mod messages;
 use std::convert::Infallible;
 use std::sync::Arc;
 
+use async_openai::tools::{ToolCallStreamManager, ToolManager};
 use async_openai::types::{
     ChatCompletionMessageToolCall, ChatCompletionRequestAssistantMessageArgs,
-    ChatCompletionRequestToolMessage, ChatCompletionRequestUserMessage,
-    CreateChatCompletionRequestArgs,
+    ChatCompletionRequestMessage, ChatCompletionRequestToolMessage,
+    ChatCompletionRequestUserMessage, CreateChatCompletionRequestArgs,
 };
 use axum::response::sse::Event;
 use futures::StreamExt;
@@ -15,7 +16,7 @@ use serde::Serialize;
 use sqlx::SqlitePool;
 use tokio::sync::mpsc::Sender;
 
-use crate::ai_utils::{AI_CLIENT, AI_MODEL, ToolCallStreamManager, ToolManager};
+use crate::ai_utils::{AI_CLIENT, AI_MODEL};
 use crate::books::library::Library;
 use crate::books::tools::{BookJumpTool, GetChapterTool};
 
@@ -44,12 +45,21 @@ impl TeacherAgent {
         .await?;
         Ok(())
     }
-    pub async fn new(
-        library: Arc<Library>,
-        student_id: i64,
-        book_id: i64,
-        database: SqlitePool,
-    ) -> anyhow::Result<Self> {
+    pub async fn new(library: Arc<Library>, student_id: i64, book_id: i64) -> anyhow::Result<Self> {
+        let database = library.database.clone();
+
+        if sqlx::query_scalar!(
+            "select book_id from teacher_agent where student_id = ? and book_id = ?",
+            student_id,
+            book_id
+        )
+        .fetch_optional(&database)
+        .await?
+        .is_none()
+        {
+            return Err(anyhow::anyhow!("Teacher agent not found"));
+        }
+
         let record = sqlx::query!("select ai_model, token_budget FROM agent_setting")
             .fetch_one(&database)
             .await?;
@@ -59,7 +69,9 @@ impl TeacherAgent {
         let mut tool_manager = ToolManager::default();
         tool_manager.add_tool(GetChapterTool::new(book_id, library.clone()));
         tool_manager.add_tool(BookJumpTool::new(book_id, library.clone()));
-        tool_manager.add_tools(messages.get_tools());
+        for tool in messages.get_tools() {
+            tool_manager.add_tool_dyn(tool);
+        }
         Ok(Self {
             messages,
             tool_manager,
@@ -100,7 +112,7 @@ impl TeacherAgent {
                     whole_refusal.push_str(refusal);
                 }
                 if let Some(tool_call_chunks) = choice.delta.tool_calls {
-                    tool_call_manager.merge_chunks(tool_call_chunks);
+                    tool_call_manager.process_chunks(tool_call_chunks);
                 }
             }
             let mut message_builder = ChatCompletionRequestAssistantMessageArgs::default();
@@ -112,7 +124,7 @@ impl TeacherAgent {
                     .await?;
                 message_builder.refusal(whole_refusal);
             }
-            let tool_calls = tool_call_manager.get_tool_calls();
+            let tool_calls = tool_call_manager.finish_stream();
             if !tool_calls.is_empty() {
                 message_builder.tool_calls(tool_calls.clone());
             }
@@ -137,6 +149,9 @@ impl TeacherAgent {
                 .await?;
         }
         Ok(())
+    }
+    pub async fn get_conversation(&self) -> Vec<ChatCompletionRequestMessage> {
+        self.messages.get_conversation()
     }
 }
 

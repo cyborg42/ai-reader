@@ -1,17 +1,11 @@
-use std::{
-    collections::{BTreeMap, HashMap, hash_map::Entry},
-    pin::Pin,
-    sync::{Arc, LazyLock},
-};
+use std::sync::LazyLock;
 
 use async_openai::{
     Client,
     config::OpenAIConfig,
     types::{
-        ChatCompletionMessageToolCall, ChatCompletionMessageToolCallChunk,
-        ChatCompletionNamedToolChoice, ChatCompletionRequestMessage,
-        ChatCompletionRequestToolMessage, ChatCompletionTool, ChatCompletionToolChoiceOption,
-        ChatCompletionToolType, CreateChatCompletionRequestArgs, FunctionCall, FunctionCallStream,
+        ChatCompletionNamedToolChoice, ChatCompletionRequestMessage, ChatCompletionTool,
+        ChatCompletionToolChoiceOption, ChatCompletionToolType, CreateChatCompletionRequestArgs,
         FunctionName, FunctionObject,
     },
 };
@@ -19,7 +13,6 @@ use async_openai::{
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tracing::error;
 
 pub static AI_MODEL: LazyLock<String> = LazyLock::new(|| dotenvy::var("AI_MODEL").unwrap());
 
@@ -94,123 +87,6 @@ impl Tokens for ChatCompletionRequestMessage {
                 }
             },
         }
-    }
-}
-
-pub trait Tool: Send + Sync {
-    type Args: JsonSchema + for<'a> Deserialize<'a> + Send + Sync;
-    type Output: Serialize + Send + Sync;
-    fn name(&self) -> String {
-        Self::Args::schema_name()
-    }
-    fn description(&self) -> Option<String> {
-        None
-    }
-    fn parameters(&self) -> serde_json::Value {
-        json!(schema_for!(Self::Args))
-    }
-    fn definition(&self) -> ChatCompletionTool {
-        ChatCompletionTool {
-            r#type: ChatCompletionToolType::Function,
-            function: FunctionObject {
-                name: self.name(),
-                description: self.description(),
-                parameters: Some(self.parameters()),
-                strict: None,
-            },
-        }
-    }
-    fn call(&self, args: Self::Args) -> impl Future<Output = anyhow::Result<Self::Output>> + Send;
-}
-
-pub trait ToolDyn: Send + Sync {
-    fn name(&self) -> String;
-    fn definition(&self) -> ChatCompletionTool;
-    fn call(
-        &self,
-        args: String,
-    ) -> Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send + '_>>;
-}
-impl<T: Tool> ToolDyn for T {
-    fn name(&self) -> String {
-        T::name(self)
-    }
-    fn definition(&self) -> ChatCompletionTool {
-        T::definition(self)
-    }
-    fn call(
-        &self,
-        args: String,
-    ) -> Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send + '_>> {
-        let future = async move {
-            match serde_json::from_str::<T::Args>(&args)
-                .or_else(|e| serde_json::from_str::<T::Args>("null").map_err(|_| e))
-            {
-                Ok(args) => T::call(self, args).await.and_then(|output| {
-                    serde_json::to_string(&output)
-                        .map_err(|e| anyhow::anyhow!("Failed to serialize output: {}", e))
-                }),
-                Err(e) => Err(anyhow::anyhow!("Failed to parse arguments: {}", e)),
-            }
-        };
-        Box::pin(future)
-    }
-}
-#[derive(Default)]
-pub struct ToolManager {
-    tools: BTreeMap<String, Arc<dyn ToolDyn>>,
-}
-
-impl ToolManager {
-    pub fn add_tool(&mut self, tool: impl Tool + 'static) {
-        self.tools.insert(tool.name(), Arc::new(tool));
-    }
-    pub fn add_tools(&mut self, tools: impl IntoIterator<Item = Arc<dyn ToolDyn>>) {
-        for tool in tools {
-            self.tools.insert(tool.name(), tool);
-        }
-    }
-    pub fn get_tools(&self) -> Vec<ChatCompletionTool> {
-        self.tools.values().map(|tool| tool.definition()).collect()
-    }
-    pub async fn call(
-        &self,
-        calls: impl IntoIterator<Item = ChatCompletionMessageToolCall>,
-    ) -> Vec<ChatCompletionRequestToolMessage> {
-        let mut handler = Vec::new();
-
-        let mut outputs = Vec::new();
-        // Spawn a task for each tool call
-        for call in calls {
-            if let Some(tool) = self.tools.get(&call.function.name).cloned() {
-                let handle = tokio::spawn(async move { tool.call(call.function.arguments).await });
-                handler.push((call.id, handle));
-            } else {
-                outputs.push(ChatCompletionRequestToolMessage {
-                    content: "Tool not found".into(),
-                    tool_call_id: call.id,
-                });
-            }
-        }
-        // Collect results from all spawned tasks
-        for (id, handle) in handler {
-            let output = match handle.await {
-                Ok(Ok(output)) => output,
-                Ok(Err(e)) => {
-                    error!("Tool call {} failed: {}", id, e);
-                    format!("Tool call failed: {}", e)
-                }
-                Err(e) => {
-                    error!("Tool call {} failed: {}", id, e);
-                    format!("Tool call failed: {}", e)
-                }
-            };
-            outputs.push(ChatCompletionRequestToolMessage {
-                content: output.into(),
-                tool_call_id: id,
-            });
-        }
-        outputs
     }
 }
 
@@ -298,63 +174,12 @@ pub fn extract_tool<T: JsonSchema>(strict: Option<bool>) -> ChatCompletionTool {
     }
 }
 
-#[derive(Default, Clone, Debug)]
-pub struct ToolCallStreamManager(HashMap<u32, ChatCompletionMessageToolCall>);
-
-impl ToolCallStreamManager {
-    pub fn new() -> Self {
-        Self(HashMap::new())
-    }
-    pub fn merge_chunk(&mut self, chunk: ChatCompletionMessageToolCallChunk) {
-        match self.0.entry(chunk.index) {
-            Entry::Occupied(mut o) => {
-                if let Some(FunctionCallStream {
-                    name: _,
-                    arguments: Some(arguments),
-                }) = chunk.function
-                {
-                    o.get_mut().function.arguments.push_str(&arguments);
-                }
-            }
-            Entry::Vacant(o) => {
-                let ChatCompletionMessageToolCallChunk {
-                    index: _,
-                    id: Some(id),
-                    r#type: _,
-                    function:
-                        Some(FunctionCallStream {
-                            name: Some(name),
-                            arguments: Some(arguments),
-                        }),
-                } = chunk
-                else {
-                    tracing::error!("Tool call chunk is not complete: {:?}", chunk);
-                    return;
-                };
-                let tool_call = ChatCompletionMessageToolCall {
-                    id,
-                    r#type: ChatCompletionToolType::Function,
-                    function: FunctionCall { name, arguments },
-                };
-                o.insert(tool_call);
-            }
-        }
-    }
-    pub fn merge_chunks(
-        &mut self,
-        chunks: impl IntoIterator<Item = ChatCompletionMessageToolCallChunk>,
-    ) {
-        for chunk in chunks {
-            self.merge_chunk(chunk);
-        }
-    }
-    pub fn get_tool_calls(self) -> Vec<ChatCompletionMessageToolCall> {
-        self.0.into_values().collect()
-    }
-}
-
 #[cfg(test)]
 mod tests {
+
+    use std::collections::BTreeMap;
+
+    use async_openai::{tools::Tool, tools::ToolManager, types::ChatCompletionMessageToolCall};
 
     use super::*;
     use crate::{
@@ -371,7 +196,8 @@ mod tests {
         impl Tool for QueryChapterTool {
             type Args = ChapterNumber;
             type Output = ChapterRaw;
-            fn name(&self) -> String {
+            type Error = anyhow::Error;
+            fn name() -> String {
                 "QueryChapterTool".to_string()
             }
             fn call(
@@ -397,7 +223,7 @@ mod tests {
         let tool = QueryChapterTool {
             chapters: BTreeMap::from_iter([(chapter1.number.clone(), chapter1)]),
         };
-        let mut tool_manager = ToolManager::default();
+        let mut tool_manager = ToolManager::new();
         tool_manager.add_tool(tool);
         let tools = tool_manager.get_tools();
         println!("tools: {:#?}", tools);

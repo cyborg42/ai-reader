@@ -1,5 +1,11 @@
 use std::{convert::Infallible, sync::Arc, time::Duration};
 
+use async_openai::types::{
+    ChatCompletionRequestAssistantMessageContent, ChatCompletionRequestAssistantMessageContentPart,
+    ChatCompletionRequestMessage, ChatCompletionRequestToolMessageContent,
+    ChatCompletionRequestToolMessageContentPart, ChatCompletionRequestUserMessageContent,
+    ChatCompletionRequestUserMessageContentPart,
+};
 use axum::{
     Extension, Router,
     extract::{Json, Multipart, Query, State},
@@ -10,7 +16,7 @@ use axum::{
     routing::{get, post},
 };
 use moka::future::Cache;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, mpsc::channel};
 use tokio_stream::wrappers::ReceiverStream;
 use tower_sessions::Session;
@@ -229,13 +235,138 @@ pub async fn delete_book(
     }
 }
 
+type TeacherAgentCache = Cache<(i64, i64), Arc<Mutex<TeacherAgent>>>;
+
+#[derive(Serialize, ToSchema)]
+pub enum ConversationMessage {
+    User {
+        content: String,
+    },
+    Assistant {
+        content: String,
+        tool_calls: Vec<String>,
+    },
+    Tool {
+        content: String,
+    },
+}
+
+impl TryFrom<ChatCompletionRequestMessage> for ConversationMessage {
+    type Error = ();
+
+    fn try_from(message: ChatCompletionRequestMessage) -> Result<Self, ()> {
+        match message {
+            ChatCompletionRequestMessage::User(msg) => match msg.content {
+                ChatCompletionRequestUserMessageContent::Text(text) => {
+                    Ok(Self::User { content: text })
+                }
+                ChatCompletionRequestUserMessageContent::Array(arr) => {
+                    let mut content = String::new();
+                    for a in arr {
+                        let ChatCompletionRequestUserMessageContentPart::Text(text) = a else {
+                            continue;
+                        };
+                        content.push_str(&text.text);
+                    }
+                    Ok(Self::User { content })
+                }
+            },
+            ChatCompletionRequestMessage::Assistant(msg) => {
+                let mut content = String::new();
+                match msg.content {
+                    Some(ChatCompletionRequestAssistantMessageContent::Text(t)) => content = t,
+                    Some(ChatCompletionRequestAssistantMessageContent::Array(arr)) => {
+                        for a in arr {
+                            let ChatCompletionRequestAssistantMessageContentPart::Text(t) = a
+                            else {
+                                continue;
+                            };
+                            content.push_str(&t.text);
+                        }
+                    }
+                    None => {}
+                }
+                let tool_calls = msg
+                    .tool_calls
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|t| t.function.name)
+                    .collect();
+                Ok(Self::Assistant {
+                    content,
+                    tool_calls,
+                })
+            }
+            ChatCompletionRequestMessage::Tool(msg) => {
+                let mut content = String::new();
+                match msg.content {
+                    ChatCompletionRequestToolMessageContent::Text(t) => content = t,
+                    ChatCompletionRequestToolMessageContent::Array(arr) => {
+                        for a in arr {
+                            let ChatCompletionRequestToolMessageContentPart::Text(t) = a;
+                            content.push_str(&t.text);
+                        }
+                    }
+                };
+                Ok(Self::Tool { content })
+            }
+            _ => Err(()),
+        }
+    }
+}
+
+#[utoipa::path(
+    context_path = "/api/user",
+    path = "/get_conversation",
+    method(get),
+    params(
+        ("book_id" = i64, Query, description = "ID of the book to get conversation for")
+    ),
+    responses(
+        (status = 200, description = "Conversation", body = Vec<ConversationMessage>),
+    )
+)]
+pub async fn get_conversation(
+    State(library): State<Arc<Library>>,
+    Extension(cache): Extension<Arc<TeacherAgentCache>>,
+    session: Session,
+    Query(book_id): Query<i64>,
+) -> impl IntoResponse {
+    let Ok(Some(student_id)) = session.get::<i64>("student_id").await else {
+        return (axum::http::StatusCode::UNAUTHORIZED, ()).into_response();
+    };
+    let teacher = match cache
+        .try_get_with((student_id, book_id), async move {
+            match TeacherAgent::new(library, student_id, book_id).await {
+                Ok(teacher) => {
+                    let teacher = Arc::new(Mutex::new(teacher));
+                    Ok(teacher)
+                }
+                Err(e) => Err(e.to_string()),
+            }
+        })
+        .await
+    {
+        Ok(teacher) => teacher,
+        Err(e) => {
+            return (axum::http::StatusCode::BAD_REQUEST, e.to_string()).into_response();
+        }
+    };
+    let teacher = teacher.lock().await;
+    let history: Vec<ConversationMessage> = teacher
+        .get_conversation()
+        .await
+        .into_iter()
+        .filter_map(|m| ConversationMessage::try_from(m).ok())
+        .collect();
+    Json(history).into_response()
+}
+
 #[derive(Deserialize, ToSchema)]
 pub struct ChatRequest {
     book_id: i64,
     message: String,
 }
-
-type TeacherAgentCache = Cache<(i64, i64), Arc<Mutex<TeacherAgent>>>;
 
 #[utoipa::path(
     context_path = "/api/user",
@@ -243,7 +374,7 @@ type TeacherAgentCache = Cache<(i64, i64), Arc<Mutex<TeacherAgent>>>;
     method(post),
     request_body = ChatRequest,
     responses(
-        (status = 200, description = "Chat response", body = String),
+        (status = 200, description = "Chat response stream", content_type = "text/event-stream"),
         (status = 401, description = "Unauthorized"),
         (status = 400, description = "Bad request")
     )
@@ -254,14 +385,13 @@ pub async fn chat(
     session: Session,
     Json(req): Json<ChatRequest>,
 ) -> impl IntoResponse {
-    let db = library.database.clone();
     let Ok(Some(student_id)) = session.get::<i64>("student_id").await else {
         return (axum::http::StatusCode::UNAUTHORIZED, ()).into_response();
     };
     let ChatRequest { book_id, message } = req;
     let teacher = match cache
         .try_get_with((student_id, book_id), async move {
-            match TeacherAgent::new(library, student_id, book_id, db.clone()).await {
+            match TeacherAgent::new(library, student_id, book_id).await {
                 Ok(teacher) => {
                     let teacher = Arc::new(Mutex::new(teacher));
                     Ok(teacher)
@@ -300,6 +430,10 @@ pub fn get_user_scope(cache: Arc<TeacherAgentCache>) -> Router<Arc<Library>> {
             .route("/delete_book", post(delete_book))
             .route("/add_book", post(add_book))
             .route("/upload_and_add_books", post(upload_and_add_books))
+            .route(
+                "/get_conversation",
+                get(get_conversation).layer(Extension(cache.clone())),
+            )
             .route("/chat", post(chat).layer(Extension(cache))),
     )
 }

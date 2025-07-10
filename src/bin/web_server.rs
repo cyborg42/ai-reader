@@ -3,7 +3,7 @@ use std::{net::SocketAddr, path::PathBuf};
 
 use axum::Router;
 use axum_server::tls_rustls::RustlsConfig;
-use book_server::{
+use ai_reader::{
     api::{manager::get_manager_scope, public::get_public_scope, user::get_user_scope},
     books::library::Library,
     utils::init_log,
@@ -37,29 +37,30 @@ struct Args {
 
 #[derive(OpenApi)]
 #[openapi(paths(
-    book_server::api::user::create_user,
-    book_server::api::user::login,
-    book_server::api::user::logout,
-    book_server::api::user::user_info,
-    book_server::api::user::list_books,
-    book_server::api::user::upload_and_add_books,
-    book_server::api::user::add_book,
-    book_server::api::user::delete_book,
-    book_server::api::user::chat,
-    book_server::api::public::get_public_books,
+    ai_reader::api::user::create_user,
+    ai_reader::api::user::login,
+    ai_reader::api::user::logout,
+    ai_reader::api::user::user_info,
+    ai_reader::api::user::list_books,
+    ai_reader::api::user::upload_and_add_books,
+    ai_reader::api::user::add_book,
+    ai_reader::api::user::delete_book,
+    ai_reader::api::user::get_conversation,
+    ai_reader::api::user::chat,
+    ai_reader::api::public::get_public_books,
 ))]
 struct UserApiDoc;
 
 #[derive(OpenApi)]
 #[openapi(paths(
-    book_server::api::manager::login,
-    book_server::api::manager::logout,
-    book_server::api::manager::list_books,
-    book_server::api::manager::upload_public_book,
-    book_server::api::manager::remove_book,
-    book_server::api::manager::set_book_public,
-    book_server::api::manager::list_students,
-    book_server::api::public::get_public_books,
+    ai_reader::api::manager::login,
+    ai_reader::api::manager::logout,
+    ai_reader::api::manager::list_books,
+    ai_reader::api::manager::upload_public_book,
+    ai_reader::api::manager::remove_book,
+    ai_reader::api::manager::set_book_public,
+    ai_reader::api::manager::list_students,
+    ai_reader::api::public::get_public_books,
 ))]
 struct ManagerApiDoc;
 

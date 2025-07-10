@@ -49,7 +49,6 @@ async fn manager_login(
         (status = 400, description = "Invalid credentials")
     )
 )]
-#[axum::debug_handler]
 pub async fn login(
     State(library): State<Arc<Library>>,
     session: Session,

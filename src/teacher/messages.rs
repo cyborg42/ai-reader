@@ -6,14 +6,14 @@ use std::{
 };
 
 use anyhow::bail;
-use async_openai::types::ChatCompletionRequestMessage;
+use async_openai::{tools::ToolDyn, types::ChatCompletionRequestMessage};
 use progress::{BookProgress, ChapterObjective, ChapterProgress, ChapterStatus};
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
 use tools::{AddMemoryTool, GetBookProgressTool, ProgressUpdateTool};
 
 use crate::{
-    ai_utils::{Tokens, ToolDyn},
+    ai_utils::Tokens,
     books::{book::Book, chapter::ChapterNumber},
 };
 
@@ -261,6 +261,10 @@ impl MessagesManager {
         let mut result = vec![self.instruction.clone(), self.book_info.clone()];
         result.extend(self.conversation.clone());
         result
+    }
+
+    pub fn get_conversation(&self) -> Vec<ChatCompletionRequestMessage> {
+        self.conversation.clone()
     }
 
     fn update_token_count(&mut self) {
