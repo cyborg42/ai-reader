@@ -9,6 +9,7 @@ An AI-assisted teaching app based on mdbook.
 - Supports book creation, deletion, reading, searching, and other functions.
 - Supports AI-assisted teaching to help students better understand book content.
 
+
 ## Setup
 
 ```bash
