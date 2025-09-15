@@ -1,13 +1,13 @@
 use std::sync::Arc;
 use std::{net::SocketAddr, path::PathBuf};
 
-use axum::Router;
-use axum_server::tls_rustls::RustlsConfig;
 use ai_reader::{
     api::{manager::get_manager_scope, public::get_public_scope, user::get_user_scope},
     books::library::Library,
     utils::init_log,
 };
+use axum::Router;
+use axum_server::tls_rustls::RustlsConfig;
 use clap::Parser;
 use moka::future::Cache;
 use sqlx::SqlitePool;
@@ -124,10 +124,10 @@ async fn main() -> anyhow::Result<()> {
 async fn init_session_database(path: PathBuf) -> anyhow::Result<SqliteStore> {
     if !path.exists() {
         // Create parent directories if they don't exist
-        if let Some(parent) = path.parent() {
-            if !parent.exists() {
-                tokio::fs::create_dir_all(parent).await?;
-            }
+        if let Some(parent) = path.parent()
+            && !parent.exists()
+        {
+            tokio::fs::create_dir_all(parent).await?;
         }
         // Create an empty file
         let _ = tokio::fs::File::create(&path).await?;
